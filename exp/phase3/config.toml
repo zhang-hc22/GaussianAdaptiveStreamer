@@ -1,0 +1,27 @@
+# Short matrix for the phase 3 acceptance (exp/phase3/accept.sh): the first
+# 300 viewpoints, 2 repetitions. Same layout as exp/config.toml.
+
+[server]
+resolution = "800x600"
+warmup_s = 10
+timeout_s = 300
+metric_stride = 12
+
+[ghent]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+reps = 2
+max_viewpoints = 300
+
+[rtt]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [20, 60]
+abrs = ["simple", "l2a", "lol+"]
+reps = 2
+max_viewpoints = 300

@@ -1,0 +1,285 @@
+#!/usr/bin/env python
+"""Tables and figures of a results directory.
+
+Per frame (frames.ndjson; times in ms since t0):
+- latency: drawn - send, from asking for the viewpoint to drawing its frame;
+- network time: responseEnd - requestStart of the /render request;
+- render time: what the server reported;
+- transfer rate: (bytes - 1200) * 8 / (responseEnd - responseStart), frames
+  of at least 3 kB only (as exp/phase2/check_trace.py).
+Per run: bandwidth used = all frame bytes / playback time; switches = frames
+whose profile differs from the previous frame; quality = mean over the
+frames in metrics/.
+
+Tables:
+  summary/runs.csv        one row per run
+  summary/conditions.csv  mean and standard deviation over the repetitions
+Figures (a condition is scene, trajectory, trace and RTT):
+  figs/quality_<condition>.pdf   six quality metrics per ABR, frames of all
+                                 repetitions (paper figure 5)
+  figs/system_<condition>.pdf    latency, render time, profiles, bandwidth,
+                                 switches per ABR (paper figure 7)
+  figs/rtt_<scene>_<trajectory>.pdf   runs without a trace: latency per frame
+                                 at the lowest RTT (first repetition), and mean
+                                 latency, mean profile and switches against
+                                 RTT (paper figure 8)
+  figs/timeseries/<run>.pdf      one run over time: trace bandwidth and
+                                 transfer rate, profile, latency
+
+  python exp/summarize.py RESULTS_DIR
+"""
+import argparse
+import json
+import os
+
+import matplotlib
+import numpy as np
+import pandas as pd
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+from common import find_runs  # noqa: E402
+from make_traces import segments  # noqa: E402
+
+ABRS = ["simple", "l2a", "lol+"]
+LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+"}   # names in the paper
+COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3"}
+PROFILE_COLOR = ["#253494", "#2c7fb8", "#41b6c4", "#a1dab4"]
+METRICS = {"psnr": "PSNR (dB)", "ssim": "SSIM", "vmaf": "VMAF", "vif": "VIF",
+           "lpips": "LPIPS", "dists": "DISTS"}
+MIN_BYTES = 3000
+KEYS = ["scene", "trajectory", "trace", "rtt_ms"]
+
+
+def frame_table(r, run):
+    fr = pd.DataFrame([json.loads(l) for l in open(os.path.join(r["dir"], "frames.ndjson"))])
+    if "error" in fr:
+        fr = fr[fr["error"].isna()].copy()
+    fr["latency_ms"] = fr["drawn"] - fr["send"]
+    fr["net_ms"] = fr["resp_end"] - fr["req_start"]
+    dt = fr["resp_end"] - fr["resp_start"]
+    big = (fr["bytes"] >= MIN_BYTES) & (dt > 0)
+    fr["rate_mbps"] = np.where(big, (fr["bytes"] - 1200) * 8 / dt.where(dt > 0) / 1e3, np.nan)
+    fr["t_s"] = (fr["send"] - run["start_ms"]) / 1e3
+    # middle of the transfer at the bottleneck, as playback time
+    fr["rate_t_s"] = ((fr["resp_start"] + fr["resp_end"]) / 2 - run["rattan"]["rtt_ms"] / 2
+                      - run["start_ms"]) / 1e3
+    return fr
+
+
+def run_row(r, run, fr, q):
+    dur = (run["end_ms"] - run["start_ms"]) / 1e3
+    row = {k: r[k] for k in KEYS + ["abr", "rep"]}
+    row.update({
+        "seed": run["args"]["seed"], "viewpoints": run["viewpoints"], "failed": run["failed_frames"],
+        "duration_s": dur, "fps": len(fr) / dur,
+        "latency_ms": fr["latency_ms"].mean(), "latency_median_ms": fr["latency_ms"].median(),
+        "latency_p95_ms": fr["latency_ms"].quantile(0.95), "net_ms": fr["net_ms"].mean(),
+        "render_ms": fr["render_ms"].mean(), "bandwidth_mbps": fr["bytes"].sum() * 8 / dur / 1e6,
+        "profile_mean": fr["profile"].mean(), "profile_median": fr["profile"].median(),
+        "switches": int((fr["profile"].diff().fillna(0) != 0).sum()),
+    })
+    for p in range(4):
+        row[f"share_p{p}"] = (fr["profile"] == p).mean()
+    for m in METRICS:
+        row[m] = q[m].mean() if q is not None else np.nan
+    row["quality_frames"] = len(q) if q is not None else 0
+    row["trace_start_ms"] = run["rattan"]["trace_start_ms"]
+    row["tigas_commit"] = run["tigas_commit"]
+    return row
+
+
+def cond_name(c):
+    scene, traj, trace, rtt = c
+    return f"{scene}_{traj.replace('/', '-')}_{trace}_rtt{rtt:g}"
+
+
+def abrs_in(df):
+    return [a for a in ABRS if a in set(df["abr"])] + sorted(set(df["abr"]) - set(ABRS))
+
+
+def boxes(ax, data, abrs, ylabel):
+    bp = ax.boxplot([data[a] for a in abrs], showfliers=False, showmeans=True, widths=0.6,
+                    patch_artist=True, meanprops={"marker": "o", "markerfacecolor": "white",
+                                                  "markeredgecolor": "black", "markersize": 4})
+    for patch, a in zip(bp["boxes"], abrs):
+        patch.set_facecolor(COLOR.get(a, "grey"))
+        patch.set_alpha(0.6)
+    ax.set_xticks(range(1, len(abrs) + 1), [LABEL.get(a, a) for a in abrs])
+    ax.set_ylabel(ylabel)
+
+
+def per_run(ax, runs, abrs, col, ylabel):
+    for k, a in enumerate(abrs, 1):
+        v = runs[runs["abr"] == a][col]
+        ax.bar(k, v.mean(), width=0.6, color=COLOR.get(a, "grey"), alpha=0.6)
+        ax.scatter(np.full(len(v), k), v, s=10, color="black", zorder=3)
+    ax.set_xticks(range(1, len(abrs) + 1), [LABEL.get(a, a) for a in abrs])
+    ax.set_ylabel(ylabel)
+
+
+def fig_quality(quality, path):
+    abrs = abrs_in(quality)
+    fig, axes = plt.subplots(2, 3, figsize=(9, 5))
+    for ax, (m, label) in zip(axes.flat, METRICS.items()):
+        boxes(ax, {a: quality[quality["abr"] == a][m].dropna() for a in abrs}, abrs, label)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def fig_system(frames, runs, path):
+    abrs = abrs_in(runs)
+    fig, axes = plt.subplots(1, 5, figsize=(14, 3))
+    boxes(axes[0], {a: frames[frames["abr"] == a]["latency_ms"] for a in abrs}, abrs, "latency (ms)")
+    boxes(axes[1], {a: frames[frames["abr"] == a]["render_ms"] for a in abrs}, abrs, "render time (ms)")
+    ax = axes[2]
+    bottom = np.zeros(len(abrs))
+    for p in range(4):
+        share = np.array([runs[runs["abr"] == a][f"share_p{p}"].mean() for a in abrs])
+        ax.bar(range(1, len(abrs) + 1), share, bottom=bottom, width=0.6, color=PROFILE_COLOR[p],
+               label=f"{800 >> p}x{600 >> p}")
+        bottom += share
+    ax.set_xticks(range(1, len(abrs) + 1), [LABEL.get(a, a) for a in abrs])
+    ax.set_ylabel("share of frames")
+    ax.set_ylim(0, 1)
+    per_run(axes[3], runs, abrs, "bandwidth_mbps", "bandwidth used (Mbit/s)")
+    per_run(axes[4], runs, abrs, "switches", "profile switches")
+    handles, labels = axes[2].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def fig_rtt(frames, runs, path):
+    abrs = abrs_in(runs)
+    rtts = sorted(set(runs["rtt_ms"]))
+    fig, axes = plt.subplots(2, 2, figsize=(10, 6))
+    ax = axes[0, 0]
+    base = frames[(frames["rtt_ms"] == rtts[0]) & (frames["rep"] == frames["rep"].min())]
+    for a in abrs:
+        f = base[base["abr"] == a]
+        ax.plot(f["t_s"], f["latency_ms"], lw=0.6, color=COLOR.get(a, "grey"), label=LABEL.get(a, a))
+    ax.set_xlabel(f"time (s), RTT {rtts[0]:g} ms")
+    ax.set_ylabel("latency (ms)")
+    ax.legend(frameon=False)
+    for ax, (col, label) in zip(axes.flat[1:], [("latency_ms", "mean latency (ms)"),
+                                                 ("profile_mean", "mean profile"),
+                                                 ("switches", "profile switches")]):
+        for a in abrs:
+            g = runs[runs["abr"] == a].groupby("rtt_ms")[col]
+            ax.errorbar(g.mean().index, g.mean(), yerr=g.std().fillna(0), marker="o", ms=4, capsize=3,
+                        color=COLOR.get(a, "grey"))
+        ax.set_xlabel("RTT (ms)")
+        ax.set_ylabel(label)
+        ax.set_xticks(rtts)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def fig_timeseries(results, r, run, fr, path):
+    trace = r["trace"] != "none"
+    rows = 3 if trace else 2
+    fig, axes = plt.subplots(rows, 1, figsize=(10, 2.2 * rows), sharex=True)
+    k = 0
+    if trace:
+        ax = axes[0]
+        segs = segments(os.path.join(results, "traces", r["trace"] + ".json"))
+        off = (run["rattan"]["trace_start_ms"] - run["start_ms"]) / 1e3
+        end = fr["t_s"].max() + 1
+        t = np.array([s[0] for s in segs] + [segs[-1][1]]) + off
+        bw = np.array([s[2] for s in segs] + [segs[-1][2]]) / 1e6
+        keep = t <= end
+        ax.step(t[keep], bw[keep], where="post", color="black", lw=0.8)
+        for p in range(4):
+            m = (fr["profile"] == p) & fr["rate_mbps"].notna()
+            ax.scatter(fr["rate_t_s"][m], fr["rate_mbps"][m], s=2, color=PROFILE_COLOR[p])
+        # y range of the playback part (the warm-up at the start is higher)
+        seen = [x[2] / 1e6 for x in segs if x[1] + off > -0.5 and x[0] + off < end]
+        rates = fr["rate_mbps"].dropna()
+        ax.set_ylim(0, 1.1 * max(seen + ([rates.quantile(0.99)] if len(rates) else [])))
+        ax.set_ylabel("Mbit/s")
+        k = 1
+    axes[k].step(fr["t_s"], fr["profile"], where="post", color="black", lw=0.6)
+    axes[k].set_yticks(range(4))
+    axes[k].set_ylim(3.3, -0.3)
+    axes[k].set_ylabel("profile")
+    axes[k + 1].scatter(fr["t_s"], fr["latency_ms"], s=2, color="black")
+    axes[k + 1].set_ylabel("latency (ms)")
+    axes[-1].set_xlabel("time (s)")
+    axes[-1].set_xlim(-0.5, fr["t_s"].max() + 0.5)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("results")
+    a = ap.parse_args()
+    results = os.path.abspath(a.results)
+    rows, frames, quality = [], [], []
+    found = find_runs(results)
+    for r in found:
+        run = json.load(open(os.path.join(r["dir"], "run.json")))
+        if run["status"] != "ok" or "rattan" not in run:
+            continue
+        fr = frame_table(r, run)
+        qpath = os.path.join(results, "metrics", r["rel"] + ".csv")
+        q = pd.read_csv(qpath) if os.path.exists(qpath) else None
+        rows.append(run_row(r, run, fr, q))
+        tag = {k: r[k] for k in KEYS + ["abr", "rep"]}
+        frames.append(fr.assign(**tag))
+        if q is not None:
+            quality.append(q.assign(**tag))
+        r["run"], r["fr"] = run, fr
+    if not rows:
+        raise SystemExit("summarize: no finished runs")
+    runs = pd.DataFrame(rows)
+    frames = pd.concat(frames, ignore_index=True)
+    quality = pd.concat(quality, ignore_index=True) if quality else None
+
+    os.makedirs(os.path.join(results, "summary"), exist_ok=True)
+    runs.to_csv(os.path.join(results, "summary", "runs.csv"), index=False)
+    num = [c for c in runs.columns if c not in KEYS + ["abr", "rep", "seed", "tigas_commit"]]
+    g = runs.groupby(KEYS + ["abr"], sort=False)[num]
+    cond = g.mean().join(g.std(), rsuffix="_std").join(g.size().rename("runs")).reset_index()
+    cond.to_csv(os.path.join(results, "summary", "conditions.csv"), index=False)
+
+    figs = os.path.join(results, "figs")
+    os.makedirs(os.path.join(figs, "timeseries"), exist_ok=True)
+    written = 0
+    for c, rs in runs.groupby(KEYS, sort=False):
+        sel = (frames[KEYS] == pd.Series(c, index=KEYS)).all(axis=1)
+        fig_system(frames[sel], rs, os.path.join(figs, f"system_{cond_name(c)}.pdf"))
+        written += 1
+        if quality is not None:
+            qs = quality[(quality[KEYS] == pd.Series(c, index=KEYS)).all(axis=1)]
+            if len(qs):
+                fig_quality(qs, os.path.join(figs, f"quality_{cond_name(c)}.pdf"))
+                written += 1
+    nt = runs[runs["trace"] == "none"]
+    for (scene, traj), rs in nt.groupby(["scene", "trajectory"], sort=False):
+        sel = (frames["trace"] == "none") & (frames["scene"] == scene) & (frames["trajectory"] == traj)
+        fig_rtt(frames[sel], rs,
+                os.path.join(figs, f"rtt_{scene}_{traj.replace('/', '-')}.pdf"))
+        written += 1
+    for r in found:
+        if "fr" not in r:
+            continue
+        name = f"{cond_name((r['scene'], r['trajectory'], r['trace'], r['rtt_ms']))}_{r['abr']}_rep{r['rep']}"
+        fig_timeseries(results, r, r["run"], r["fr"], os.path.join(figs, "timeseries", name + ".pdf"))
+        written += 1
+
+    show = ["trace", "rtt_ms", "abr", "runs", "duration_s", "latency_ms", "bandwidth_mbps",
+            "profile_mean", "switches", *METRICS]
+    with pd.option_context("display.width", 200, "display.max_columns", 30, "display.precision", 3):
+        print(cond[show].to_string(index=False))
+    print(f"summarize: {len(runs)} runs, {written} figures in {figs}")
+
+
+if __name__ == "__main__":
+    main()

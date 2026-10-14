@@ -9,7 +9,11 @@ applied (the RTT experiment).
 rattan's own log goes to <out>/rattan.log. From it this script adds to
 run.json when the trace started (rattan logs "first-payload is disabled" when
 it forwards the first packet) relative to t0, which side sent that packet,
-and how many packets rattan dropped because it was busy.
+and how many packets rattan dropped because it was busy. It also records
+the GPU.
+
+On SIGTERM or SIGINT the run is stopped the same way as on a timeout, so
+rattan can remove its network namespaces (run_all.py relies on this).
 
   python exp/run_one.py --trace T.json --rtt 20 --out DIR -- \\
       --trajectory NTHU/train/user3_train.json --abr l2a --seed 1
@@ -74,6 +78,22 @@ def stop(proc):
         return proc.wait()
 
 
+class Interrupted(Exception):
+    pass
+
+
+def interrupt(signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise Interrupted(signal.Signals(signum).name)
+
+
+def gpu():
+    out = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                         capture_output=True, text=True).stdout.strip()
+    return out or None
+
+
 def rattan_cmd(trace, rtt_ms, queue_packets=1000):
     half = f"{rtt_ms / 2:g}ms"
     cmd = [RATTAN, "link", "--uplink-delay", half, "--downlink-delay", half]
@@ -101,6 +121,7 @@ def annotate(out, trace, rtt_ms):
         "first_packet_from": re.search(r'rx_id="(\w+)"', first[0]).group(1) if first else None,
         "busy_drops": sum("system is busy" in l for l in lines),
     }
+    run["gpu"] = gpu()
     json.dump(run, open(path, "w"), indent=1)
     return run
 
@@ -121,6 +142,8 @@ def main():
         "--", sys.executable, os.path.join(REPO, "exp", "client.py"), "--out", os.path.abspath(a.out),
         *client_args]
     env = dict(os.environ, RUST_LOG="info,rattan_core::core=debug")
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, interrupt)
     with open(os.path.join(a.out, "rattan.log"), "w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
         try:
@@ -128,10 +151,15 @@ def main():
         except subprocess.TimeoutExpired:
             stop(proc)
             rc = "timeout"
+        except Interrupted as e:
+            stop(proc)
+            rc = f"interrupted by {e}"
     run = annotate(a.out, a.trace, a.rtt)
     status = run["status"] if run else "no run.json"
     if rc == "timeout":
         status = f"timeout after {a.timeout:g} s"
+    elif isinstance(rc, str):
+        status = rc
     elif rc != 0 and run and run["status"] == "ok":
         status = f"rattan exit {rc}"
     lines = [l for l in open(os.path.join(a.out, "rattan.log")) if l.startswith("client:")]
