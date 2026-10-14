@@ -378,7 +378,7 @@ def main():
             t = time.time()
             rc, text = call([sys.executable, *cmd])
             open(os.path.join(out, step + ".log"), "w").write(text)
-            for line in text.strip().splitlines()[-2:]:
+            for line in [l for l in text.strip().splitlines() if "warn" not in l.lower()][-2:]:
                 log(f"  {line}")
             log(f"{step}: {'done' if rc == 0 else 'FAILED'} ({time.time() - t:.0f} s, output in {step}.log)")
             if rc != 0:

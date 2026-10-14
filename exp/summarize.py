@@ -197,8 +197,9 @@ def fig_timeseries(results, r, run, fr, path):
         for p in range(4):
             m = (fr["profile"] == p) & fr["rate_mbps"].notna()
             ax.scatter(fr["rate_t_s"][m], fr["rate_mbps"][m], s=2, color=PROFILE_COLOR[p])
-        # y range of the playback part (the warm-up at the start is higher)
-        seen = [x[2] / 1e6 for x in segs if x[1] + off > -0.5 and x[0] + off < end]
+        # y range of the playback part; the warm-up segment, much higher, ends
+        # a few ms after playback starts
+        seen = [x[2] / 1e6 for x in segs if x[1] + off > 0.5 and x[0] + off < end]
         rates = fr["rate_mbps"].dropna()
         ax.set_ylim(0, 1.1 * max(seen + ([rates.quantile(0.99)] if len(rates) else [])))
         ax.set_ylabel("Mbit/s")
