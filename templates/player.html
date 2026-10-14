@@ -1275,6 +1275,26 @@
   });
 </script>
 
+<script>
+    // Hooks for the headless experiment client (exp/client.py, exp/runner.js).
+    // The page state lives in top-level `let` variables, which are not
+    // properties of window, so they are exported here explicitly.
+    window.TIGAS = {
+        sendPosition,
+        setAbrKind,
+        applyConfig,
+        setPose(ev) {
+            angle = Number(ev.angle);
+            elevation = Number(ev.elevation);
+            x = Number(ev.x);
+            y = Number(ev.y);
+            z = Number(ev.z);
+        },
+        camera: () => ({ angle, elevation, x, y, z, fx, fy, cx, cy, width, height }),
+        abr: () => abr,
+    };
+</script>
+
 </body>
 
 </html>
