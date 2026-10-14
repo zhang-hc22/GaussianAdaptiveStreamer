@@ -378,7 +378,10 @@ def main():
             t = time.time()
             rc, text = call([sys.executable, *cmd])
             open(os.path.join(out, step + ".log"), "w").write(text)
-            for line in [l for l in text.strip().splitlines() if "warn" not in l.lower()][-2:]:
+            lines = text.strip().splitlines()
+            if rc == 0:   # the step's own lines, without library warnings
+                lines = [l for l in lines if l.startswith(step + ":")]
+            for line in lines[-2:]:
                 log(f"  {line}")
             log(f"{step}: {'done' if rc == 0 else 'FAILED'} ({time.time() - t:.0f} s, output in {step}.log)")
             if rc != 0:
