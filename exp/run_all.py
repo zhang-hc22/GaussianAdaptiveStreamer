@@ -12,12 +12,13 @@ results into tables and figures:
    interruption the same command carries on;
 5. render the reference images (render_gt.py), after the runs so they do
    not share the GPU with an experiment;
-6. compute the quality metrics (metrics.py);
+6. compute the quality metrics, ours (metrics.py) and the paper's
+   (metrics_paper.py);
 7. write the summary tables and figures (summarize.py).
 
 Steps 1 and 3 are skipped when no run is left. Steps 5 to 7 keep what
 earlier invocations produced and only add what is missing; their output goes
-to render_gt.log, metrics.log and summarize.log.
+to render_gt.log, metrics.log, metrics_paper.log and summarize.log.
 
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
 
@@ -250,7 +251,7 @@ def stop_child():
         proc.wait()
 
 
-def warm_up(out, runs, warmup_s=30):
+def warm_up(out, runs, resolution, warmup_s=30):
     """One short local run per scene: the server loads the model and
     compiles its kernels before the first measured run."""
     for scene in sorted({r["scene"] for r in runs}):
@@ -259,7 +260,7 @@ def warm_up(out, runs, warmup_s=30):
         shutil.rmtree(d, ignore_errors=True)
         rc, text = call([sys.executable, "exp/client.py", "--server", "127.0.0.1", "--scene", scene,
                          "--trajectory", traj, "--abr", "simple", "--max-frames", "12",
-                         "--warmup", str(warmup_s), "--out", d])
+                         "--resolution", resolution, "--warmup", str(warmup_s), "--out", d])
         if rc != 0:
             raise SystemExit(f"warm-up of {scene} failed: {text.strip().splitlines()[-1:]}")
         first = json.load(open(os.path.join(d, "run.json")))["first_frame_ms"]
@@ -273,7 +274,7 @@ def run_one(cfg, out, r, trace_path):
     if trace_path:
         cmd += ["--trace", trace_path]
     cmd += ["--", "--scene", r["scene"], "--trajectory", r["trajectory"], "--abr", r["abr"],
-            "--seed", str(r["rep"]), "--warmup", f"{s['warmup_s']:g}"]
+            "--seed", str(r["rep"]), "--warmup", f"{s['warmup_s']:g}", "--resolution", s["resolution"]]
     if r["max_viewpoints"]:
         cmd += ["--max-frames", str(r["max_viewpoints"])]
     rc, text = call(cmd, stop_group=False)
@@ -301,7 +302,7 @@ def run_matrix(cfg, out, runs, pending, args):
     failed = []
     try:
         server.start()
-        warm_up(out, pending)
+        warm_up(out, pending, cfg["server"]["resolution"])
         for k, r in enumerate(pending, 1):
             run_dir = os.path.join(out, "runs", r["rel"])
             name = f"run {k}/{len(pending)} {r['rel']}"
@@ -309,7 +310,7 @@ def run_matrix(cfg, out, runs, pending, args):
                 if not server.alive():
                     log("server: died; restarting")
                     server.start()
-                    warm_up(out, pending)
+                    warm_up(out, pending, cfg["server"]["resolution"])
                 shutil.rmtree(run_dir, ignore_errors=True)
                 before, ns = experiment_procs(), netns_count()
                 t = time.time()
@@ -374,6 +375,7 @@ def main():
                 ("render_gt", ["exp/render_gt.py", out, "--stride", str(s["metric_stride"]),
                                "--resolution", s["resolution"]]),
                 ("metrics", ["exp/metrics.py", out, "--stride", str(s["metric_stride"])]),
+                ("metrics_paper", ["exp/metrics_paper.py", out, "--stride", str(s["metric_stride"])]),
                 ("summarize", ["exp/summarize.py", out])):
             t = time.time()
             rc, text = call([sys.executable, *cmd])

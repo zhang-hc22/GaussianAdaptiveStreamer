@@ -9,7 +9,8 @@ Per frame (frames.ndjson; times in ms since t0):
   of at least 3 kB only (as exp/phase2/check_trace.py).
 Per run: bandwidth used = all frame bytes / playback time; switches = frames
 whose profile differs from the previous frame; quality = mean over the
-frames in metrics/.
+frames in metrics/ (ours) and in metrics_paper/ (the paper's method,
+columns paper_<metric>).
 
 Tables:
   summary/runs.csv        one row per run
@@ -17,6 +18,7 @@ Tables:
 Figures (a condition is scene, trajectory, trace and RTT):
   figs/quality_<condition>.pdf   six quality metrics per ABR, frames of all
                                  repetitions (paper figure 5)
+  figs/quality_paper_<condition>.pdf   the same with the paper's method
   figs/system_<condition>.pdf    latency, render time, profiles, bandwidth,
                                  switches per ABR (paper figure 7)
   figs/rtt_<scene>_<trajectory>.pdf   runs without a trace: latency per frame
@@ -68,11 +70,11 @@ def frame_table(r, run):
     return fr
 
 
-def run_row(r, run, fr, q):
+def run_row(r, run, fr, q, qp):
     dur = (run["end_ms"] - run["start_ms"]) / 1e3
     row = {k: r[k] for k in KEYS + ["abr", "rep"]}
     row.update({
-        "seed": run["args"]["seed"], "viewpoints": run["viewpoints"], "failed": run["failed_frames"],
+        "resolution": f"{run['camera']['width']}x{run['camera']['height']}", "seed": run["args"]["seed"], "viewpoints": run["viewpoints"], "failed": run["failed_frames"],
         "duration_s": dur, "fps": len(fr) / dur,
         "latency_ms": fr["latency_ms"].mean(), "latency_median_ms": fr["latency_ms"].median(),
         "latency_p95_ms": fr["latency_ms"].quantile(0.95), "net_ms": fr["net_ms"].mean(),
@@ -85,6 +87,9 @@ def run_row(r, run, fr, q):
     for m in METRICS:
         row[m] = q[m].mean() if q is not None else np.nan
     row["quality_frames"] = len(q) if q is not None else 0
+    for m in METRICS:
+        row["paper_" + m] = qp[m].mean() if qp is not None else np.nan
+    row["paper_other_profile"] = (qp["profile"] != qp["sent_profile"]).mean() if qp is not None else np.nan
     row["trace_start_ms"] = run["rattan"]["trace_start_ms"]
     row["tigas_commit"] = run["tigas_commit"]
     return row
@@ -131,6 +136,7 @@ def fig_quality(quality, path):
 
 def fig_system(frames, runs, path):
     abrs = abrs_in(runs)
+    w, h = map(int, runs["resolution"].iloc[0].split("x"))
     fig, axes = plt.subplots(1, 5, figsize=(14, 3))
     boxes(axes[0], {a: frames[frames["abr"] == a]["latency_ms"] for a in abrs}, abrs, "latency (ms)")
     boxes(axes[1], {a: frames[frames["abr"] == a]["render_ms"] for a in abrs}, abrs, "render time (ms)")
@@ -139,7 +145,7 @@ def fig_system(frames, runs, path):
     for p in range(4):
         share = np.array([runs[runs["abr"] == a][f"share_p{p}"].mean() for a in abrs])
         ax.bar(range(1, len(abrs) + 1), share, bottom=bottom, width=0.6, color=PROFILE_COLOR[p],
-               label=f"{800 >> p}x{600 >> p}")
+               label=f"{w >> p}x{h >> p}")
         bottom += share
     ax.set_xticks(range(1, len(abrs) + 1), [LABEL.get(a, a) for a in abrs])
     ax.set_ylabel("share of frames")
@@ -222,30 +228,33 @@ def main():
     ap.add_argument("results")
     a = ap.parse_args()
     results = os.path.abspath(a.results)
-    rows, frames, quality = [], [], []
+    rows, frames, quality, quality_paper = [], [], [], []
     found = find_runs(results)
     for r in found:
         run = json.load(open(os.path.join(r["dir"], "run.json")))
         if run["status"] != "ok" or "rattan" not in run:
             continue
         fr = frame_table(r, run)
-        qpath = os.path.join(results, "metrics", r["rel"] + ".csv")
-        q = pd.read_csv(qpath) if os.path.exists(qpath) else None
-        rows.append(run_row(r, run, fr, q))
+        q, qp = (pd.read_csv(f) if os.path.exists(f) else None
+                 for f in (os.path.join(results, d, r["rel"] + ".csv") for d in ("metrics", "metrics_paper")))
+        rows.append(run_row(r, run, fr, q, qp))
         tag = {k: r[k] for k in KEYS + ["abr", "rep"]}
         frames.append(fr.assign(**tag))
         if q is not None:
             quality.append(q.assign(**tag))
+        if qp is not None:
+            quality_paper.append(qp.assign(**tag))
         r["run"], r["fr"] = run, fr
     if not rows:
         raise SystemExit("summarize: no finished runs")
     runs = pd.DataFrame(rows)
     frames = pd.concat(frames, ignore_index=True)
     quality = pd.concat(quality, ignore_index=True) if quality else None
+    quality_paper = pd.concat(quality_paper, ignore_index=True) if quality_paper else None
 
     os.makedirs(os.path.join(results, "summary"), exist_ok=True)
     runs.to_csv(os.path.join(results, "summary", "runs.csv"), index=False)
-    num = [c for c in runs.columns if c not in KEYS + ["abr", "rep", "seed", "tigas_commit"]]
+    num = [c for c in runs.columns if c not in KEYS + ["abr", "rep", "resolution", "seed", "tigas_commit"]]
     g = runs.groupby(KEYS + ["abr"], sort=False)[num]
     cond = g.mean().join(g.std(), rsuffix="_std").join(g.size().rename("runs")).reset_index()
     cond.to_csv(os.path.join(results, "summary", "conditions.csv"), index=False)
@@ -257,10 +266,12 @@ def main():
         sel = (frames[KEYS] == pd.Series(c, index=KEYS)).all(axis=1)
         fig_system(frames[sel], rs, os.path.join(figs, f"system_{cond_name(c)}.pdf"))
         written += 1
-        if quality is not None:
-            qs = quality[(quality[KEYS] == pd.Series(c, index=KEYS)).all(axis=1)]
+        for qa, prefix in ((quality, "quality"), (quality_paper, "quality_paper")):
+            if qa is None:
+                continue
+            qs = qa[(qa[KEYS] == pd.Series(c, index=KEYS)).all(axis=1)]
             if len(qs):
-                fig_quality(qs, os.path.join(figs, f"quality_{cond_name(c)}.pdf"))
+                fig_quality(qs, os.path.join(figs, f"{prefix}_{cond_name(c)}.pdf"))
                 written += 1
     nt = runs[runs["trace"] == "none"]
     for (scene, traj), rs in nt.groupby(["scene", "trajectory"], sort=False):
@@ -279,6 +290,10 @@ def main():
             "profile_mean", "switches", *METRICS]
     with pd.option_context("display.width", 200, "display.max_columns", 30, "display.precision", 3):
         print(cond[show].to_string(index=False))
+        print("\nthe paper's quality method (paper_other_profile: share of frames re-rendered at "
+              "another profile than requested)")
+        print(cond[["trace", "rtt_ms", "abr", "paper_other_profile", *("paper_" + m for m in METRICS)]]
+              .to_string(index=False))
     print(f"summarize: {len(runs)} runs, {written} figures in {figs}")
 
 

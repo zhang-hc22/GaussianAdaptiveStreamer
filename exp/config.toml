@@ -7,7 +7,8 @@
 # max_viewpoints (optional): play only the first N viewpoints.
 
 [server]
-resolution = "800x600"   # camera of /player; the trajectories are recorded at 800x600
+resolution = "1280x720"  # picked in /player's Resolution menu, as in the paper (the
+                         # trajectories were recorded at 800x600; only their poses are used)
 warmup_s = 10            # W: high-bandwidth start of every trace, playback starts at t0 + W
 timeout_s = 900          # per run
 metric_stride = 12       # quality metrics on every 12th viewpoint

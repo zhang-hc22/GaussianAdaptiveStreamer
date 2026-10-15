@@ -8,8 +8,10 @@ directly with --server 127.0.0.1. Steps:
 1. start headless Chromium with the flags HTTP/3 needs;
 2. note t0, open /player?modelId=<scene> and wait for the page's own first
    frame (this also loads the model on the server);
-3. at t0 + W start the playback loop of exp/runner.js with a fresh ABR;
-4. write run.json, frames.ndjson (one line per viewpoint) and
+3. pick --resolution in the page's Resolution menu and apply it, as the
+   paper's experiment start does (applyConfig), and wait for that frame;
+4. at t0 + W start the playback loop of exp/runner.js with a fresh ABR;
+5. write run.json, frames.ndjson (one line per viewpoint) and
    frames/<index>_p<profile>.jpg.
 
 Times in frames.ndjson are ms since t0.
@@ -28,6 +30,14 @@ from playwright.sync_api import sync_playwright
 from common import REPO, chromium_args, git_commit
 
 FIRST_FRAME_JS = "() => document.getElementById('stage_placeholder')?.style.display === 'none'"
+# The Apply button: the page reads its settings again (cx, cy = half the size)
+# and requests the current view at the new size.
+APPLY_RESOLUTION_JS = """res => {
+    const sel = document.getElementById('resolution');
+    sel.value = res;
+    if (sel.value !== res) throw new Error(`the Resolution menu has no ${res}`);
+    window.TIGAS.applyConfig();
+}"""
 TIMES = ("send", "req_start", "resp_start", "resp_end", "drawn")
 
 
@@ -40,6 +50,8 @@ def main():
     ap.add_argument("--abr", required=True, choices=["simple", "l2a", "lol+"])
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--warmup", type=float, default=10.0, help="W: playback starts at t0 + W s")
+    ap.add_argument("--resolution", default="800x600",
+                    help="WxH from the page's Resolution menu (800x600 is its default)")
     ap.add_argument("--max-frames", type=int, help="play only the first N viewpoints")
     ap.add_argument("--out", required=True)
     ap.add_argument("--verbose-console", action="store_true",
@@ -90,6 +102,8 @@ def main():
             page.goto(f"https://{origin}/player?modelId={a.scene}", timeout=30000)
             run["loaded_ms"] = (time.time() - t0) * 1e3
             page.wait_for_function(FIRST_FRAME_JS, timeout=60000, polling=10)
+            page.evaluate(APPLY_RESOLUTION_JS, a.resolution)
+            page.wait_for_function("() => !window.TIGAS.busy()", timeout=60000, polling=10)
             run["first_frame_ms"] = (time.time() - t0) * 1e3
             if run["first_frame_ms"] > a.warmup * 1e3:
                 raise RuntimeError(f"first frame took {run['first_frame_ms']:.0f} ms, "
