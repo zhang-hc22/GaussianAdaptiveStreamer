@@ -8,11 +8,17 @@ browser, load the page and warm up the model. The Ghent trace follows at
 trace time W, one segment per second, and repeats from its start when it
 ends, up to --total s. Values are multiplied by --scale: 8 gives the measured
 throughput, 1 the value stored in the repository file.
+--offset phi starts the Ghent part at its second phi instead of 0 (the
+ablation A1: the trace had played phi s when playback began).
+
+--tc-rates writes the same rates for exp/tc_lo_loop.sh instead, one kbit/s
+value per line and without the warm-up (the loop adds it).
 
 rattan starts the trace at the first packet it forwards; client.py takes t0
 just before that (phase 0 measured 3.4 ms), so trace time is t - t0.
 
   python exp/make_traces.py bus --scale 8 --out bus_x8.json
+  python exp/make_traces.py bus --scale 8 --offset 101 --out bus_x8_phi101.json
 """
 import argparse
 import json
@@ -27,18 +33,25 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLOOR_BPS = 100_000
 
 
-def ghent_bps(name, scale):
+def ghent_bps(name, scale, offset=0):
     vals = [float(l) for l in open(os.path.join(REPO, "traces", f"{name}.csv")) if l.strip()]
-    return [max(FLOOR_BPS, round(v * 1000 * scale)) for v in vals]
+    bps = [max(FLOOR_BPS, round(v * 1000 * scale)) for v in vals]
+    offset %= len(bps)
+    return bps[offset:] + bps[:offset]
 
 
-def build(name, scale, warmup=10, warmup_bps=50_000_000, total=3600):
-    bps = ghent_bps(name, scale)
+def build(name, scale, warmup=10, warmup_bps=50_000_000, total=3600, offset=0):
+    bps = ghent_bps(name, scale, offset)
     copies = math.ceil(max(0, total - warmup) / len(bps))
     pattern = [[f"{warmup}s", [f"{warmup_bps}bps"]],
                ["1s", [f"{b}bps" for b in bps * copies]]]
     return {"RepeatedBwPatternConfig": {
         "pattern": [{"TraceBwConfig": {"pattern": pattern}}], "count": 0}}
+
+
+def tc_rates(name, scale, offset=0):
+    """The Ghent part of build() as tc_lo_loop.sh reads it: kbit/s per line."""
+    return "".join(f"{b / 1000:g}\n" for b in ghent_bps(name, scale, offset))
 
 
 def _seconds(s):
@@ -79,14 +92,20 @@ def main():
     ap.add_argument("--warmup", type=int, default=10, help="W, s")
     ap.add_argument("--warmup-mbps", type=float, default=50)
     ap.add_argument("--total", type=int, default=3600, help="trace length, s")
+    ap.add_argument("--offset", type=int, default=0, help="phi: first second of the Ghent trace")
+    ap.add_argument("--tc-rates", action="store_true", help="write the rates for tc_lo_loop.sh")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    cfg = build(a.name, a.scale, a.warmup, round(a.warmup_mbps * 1e6), a.total)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    json.dump(cfg, open(a.out, "w"), separators=(",", ":"))
+    if a.tc_rates:
+        open(a.out, "w").write(tc_rates(a.name, a.scale, a.offset))
+    else:
+        cfg = build(a.name, a.scale, a.warmup, round(a.warmup_mbps * 1e6), a.total, a.offset)
+        json.dump(cfg, open(a.out, "w"), separators=(",", ":"))
     bps = ghent_bps(a.name, a.scale)
-    print(f"{a.out}: {a.name} x{a.scale:g}, {len(bps)} s, mean {sum(bps) / len(bps) / 1e6:.2f} Mbit/s, "
-          f"min {min(bps) / 1e6:.2f}, after {a.warmup} s at {a.warmup_mbps:g} Mbit/s")
+    print(f"{a.out}: {a.name} x{a.scale:g} from second {a.offset}, {len(bps)} s, "
+          f"mean {sum(bps) / len(bps) / 1e6:.2f} Mbit/s, min {min(bps) / 1e6:.2f}, "
+          f"after {a.warmup} s at {a.warmup_mbps:g} Mbit/s")
 
 
 if __name__ == "__main__":

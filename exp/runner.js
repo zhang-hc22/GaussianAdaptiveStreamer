@@ -3,7 +3,9 @@
 // viewpoint, the next one sent after the previous frame is drawn. It does not
 // post /metrics/predict or /movement, and records per frame the profile the
 // request actually used. Received JPEGs go to the Python side through the
-// tigasSaveFrame binding without holding up the next request.
+// tigasSaveFrame binding without holding up the next request. In a session
+// (client.py --session) it is called once per run, with the run's index and
+// the pause after the previous run (delayMs).
 (() => {
     // mulberry32: L2A and LoL+ call Math.random, a fixed seed makes runs
     // under the same network repeat the same decisions.
@@ -18,12 +20,12 @@
         };
     }
 
-    function saveFrame(i, profile, blob) {
+    function saveFrame(run, i, profile, blob) {
         return new Promise((resolve, reject) => {
             const fr = new FileReader();
             fr.onload = () => {
                 const b64 = fr.result.slice(fr.result.indexOf(',') + 1);
-                resolve(window.tigasSaveFrame(i, profile, b64));
+                resolve(window.tigasSaveFrame(run, i, profile, b64));
             };
             fr.onerror = () => reject(fr.error);
             fr.readAsDataURL(blob);
@@ -32,11 +34,12 @@
 
     const now = () => performance.timeOrigin + performance.now();  // epoch ms
 
-    window.tigasRun = async ({ events, abr, seed, startAtMs, quiet }) => {
+    window.tigasRun = async ({ events, abr, seed, run = 0, startAtMs, delayMs = 0, quiet }) => {
         const T = window.TIGAS;
         // The ABRs log several lines per frame; over CDP that costs more
         // than in a browser without devtools.
         if (quiet) console.log = console.debug = () => {};
+        if (delayMs > 0) await new Promise(r => setTimeout(r, delayMs));
         const wait = startAtMs - now();
         if (wait > 0) await new Promise(r => setTimeout(r, wait));
 
@@ -57,7 +60,7 @@
                 rec.profile = Number(r.profile);
                 rec.bytes = r.blob.size;
                 rec.render_ms = r.renderMs;
-                saves.push(saveFrame(i, rec.profile, r.blob));
+                saves.push(saveFrame(run, i, rec.profile, r.blob));
             } catch (e) {
                 rec.error = String(e);
             }

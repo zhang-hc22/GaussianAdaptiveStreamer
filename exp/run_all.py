@@ -20,6 +20,16 @@ Steps 1 and 3 are skipped when no run is left. Steps 5 to 7 keep what
 earlier invocations produced and only add what is missing; their output goes
 to render_gt.log, metrics.log, metrics_paper.log and summarize.log.
 
+Tables can also restore one of the methods of the paper (the ablations of
+exp/ablate.toml); the run directories then get a suffix after the trace:
+- offsets_s = [...]: repetition k starts the Ghent trace at its second
+  offsets_s[k-1] (make_traces.py --offset); suffix _phi;
+- sessions = {S1 = [abr order], ...}: each session plays reps runs of each
+  ABR in that order in one page, under one rattan (client.py --session);
+  suffix _<session>. A session is run, retried and kept as a whole;
+- shaper = "tc-lo": tc on lo instead of rattan (run_one.py --shaper tc-lo);
+  suffix _tclo. The qdisc on lo is removed before and after the matrix.
+
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
 
 Output in --out; run_all.log there keeps the progress lines of
@@ -38,8 +48,8 @@ import sys
 import time
 import tomllib
 
-from common import REPO, find_runs, load_events, run_rel, trace_name
-from make_traces import build
+from common import REPO, find_runs, load_events, run_rel, trace_name, traj_name
+from make_traces import build, tc_rates
 
 EXP = os.path.join(REPO, "exp")
 PORT = 4433
@@ -61,7 +71,8 @@ def interrupt(_signum, _frame):
 # ---- the run list
 
 def plan_runs(cfg, only):
-    """Every run of the config, in the order they are run."""
+    """Every run of the config, in the order they are run. Runs of a session
+    share r["unit"]; any other run is a unit of its own."""
     runs, seen, lengths = [], set(), {}
     for name, t in cfg.items():
         if name == "server" or (only and name not in only):
@@ -71,20 +82,41 @@ def plan_runs(cfg, only):
                  for trace, scale in ([(tr, s) for tr in t["traces"] for s in t["scales"]]
                                       or [(None, None)])
                  for rtt in t["rtt_ms"]]
-        for rep in range(1, t["reps"] + 1):
-            for scene, traj, trace, scale, rtt in conds:
-                for abr in t["abrs"]:
-                    n = lengths.setdefault(traj, len(load_events(traj)))
-                    r = {"exp": name, "scene": scene, "trajectory": traj, "trace": trace,
-                         "scale": scale, "trace_name": trace_name(trace, scale), "rtt_ms": rtt,
-                         "abr": abr, "rep": rep,
-                         "viewpoints": min(n, t.get("max_viewpoints") or n),
-                         "max_viewpoints": t.get("max_viewpoints")}
-                    r["rel"] = run_rel(scene, traj, r["trace_name"], rtt, abr, rep)
-                    if r["rel"] not in seen:
-                        seen.add(r["rel"])
-                        runs.append(r)
+        offsets, shaper = t.get("offsets_s"), t.get("shaper", "rattan")
+        reps = len(offsets) if offsets else t["reps"]
+        if t.get("sessions"):
+            units = [[(c, abr, rep, sname) for abr in order for rep in range(1, reps + 1)]
+                     for sname, order in t["sessions"].items() for c in conds]
+        else:
+            units = [[(c, abr, rep, None)] for rep in range(1, reps + 1) for c in conds for abr in t["abrs"]]
+        for unit in units:
+            for k, ((scene, traj, trace, scale, rtt), abr, rep, sname) in enumerate(unit, 1):
+                n = lengths.setdefault(traj, len(load_events(traj)))
+                off = offsets[rep - 1] if offsets else 0
+                label = (trace_name(trace, scale) + ("_phi" if offsets else "")
+                         + (f"_{sname}" if sname else "") + ("_tclo" if shaper == "tc-lo" else ""))
+                r = {"exp": name, "scene": scene, "trajectory": traj, "trace": trace,
+                     "scale": scale, "trace_name": trace_name(trace, scale) + (f"_phi{off}" if off else ""),
+                     "label": label, "offset_s": off, "shaper": shaper, "rtt_ms": rtt,
+                     "abr": abr, "rep": rep, "seed": rep,
+                     "session": sname, "session_index": k if sname else None,
+                     "viewpoints": min(n, t.get("max_viewpoints") or n),
+                     "max_viewpoints": t.get("max_viewpoints")}
+                r["rel"] = run_rel(scene, traj, label, rtt, abr, rep)
+                r["unit"] = (os.path.join("sessions", scene, traj_name(traj), label, f"rtt{rtt:g}")
+                             if sname else r["rel"])
+                if r["rel"] not in seen:
+                    seen.add(r["rel"])
+                    runs.append(r)
     return runs
+
+
+def units_of(runs):
+    """runs grouped by r["unit"], in order."""
+    out = {}
+    for r in runs:
+        out.setdefault(r["unit"], []).append(r)
+    return list(out.values())
 
 
 def is_done(run_dir, viewpoints):
@@ -92,7 +124,8 @@ def is_done(run_dir, viewpoints):
         run = json.load(open(os.path.join(run_dir, "run.json")))
     except (OSError, ValueError):
         return False
-    return run.get("status") == "ok" and "rattan" in run and run.get("viewpoints") == viewpoints
+    return (run.get("status") == "ok" and ("rattan" in run or "tc" in run)
+            and run.get("viewpoints") == viewpoints)
 
 
 # ---- steps 1 and 2
@@ -117,17 +150,23 @@ def check_env(cfg, runs):
 
 
 def write_traces(cfg, out, runs):
-    """traces/<trace>_x<scale>.json; refuses to change a trace that finished
-    runs used."""
+    """traces/<trace>_x<scale>[_phi<offset>].json for rattan, .rates for
+    tc_lo_loop.sh; refuses to change a trace that finished runs used."""
     os.makedirs(os.path.join(out, "traces"), exist_ok=True)
-    paths = {}
+    s, paths = cfg["server"], {}
     for r in runs:
-        if not r["trace"] or r["trace_name"] in paths:
+        key = (r["trace_name"], r["shaper"])
+        if not r["trace"] or key in paths:
             continue
-        path = os.path.join(out, "traces", r["trace_name"] + ".json")
-        text = json.dumps(build(r["trace"], r["scale"], cfg["server"]["warmup_s"]), separators=(",", ":"))
+        if r["shaper"] == "tc-lo":
+            path = os.path.join(out, "traces", r["trace_name"] + ".rates")
+            text = tc_rates(r["trace"], r["scale"], r["offset_s"])
+        else:
+            path = os.path.join(out, "traces", r["trace_name"] + ".json")
+            text = json.dumps(build(r["trace"], r["scale"], s["warmup_s"], total=s.get("trace_total_s", 3600),
+                                    offset=r["offset_s"]), separators=(",", ":"))
         if os.path.exists(path) and open(path).read() != text:
-            used = [x["rel"] for x in runs if x["trace_name"] == r["trace_name"]
+            used = [x["rel"] for x in runs if (x["trace_name"], x["shaper"]) == key
                     and is_done(os.path.join(out, "runs", x["rel"]), x["viewpoints"])]
             if used:
                 raise SystemExit(f"{path} would change, but {len(used)} finished runs used it; "
@@ -135,7 +174,7 @@ def write_traces(cfg, out, runs):
         if not os.path.exists(path) or open(path).read() != text:
             open(path, "w").write(text)
             log(f"trace: wrote {os.path.relpath(path, out)}")
-        paths[r["trace_name"]] = path
+        paths[key] = path
     return paths
 
 
@@ -162,7 +201,8 @@ def experiment_procs():
         except OSError:
             continue
         if (os.path.basename(cmd[0]) == "rattan" or "ms-playwright" in cmd[0]
-                or "playwright/driver" in cmd[0] or any(a.endswith("exp/client.py") for a in cmd)):
+                or "playwright/driver" in cmd[0]
+                or any(a.endswith(("exp/client.py", "exp/tc_lo_loop.sh")) for a in cmd)):
             out.add(int(d))
     return out
 
@@ -181,6 +221,20 @@ def kill_new(before):
         if not left:
             break
     return left
+
+
+def lo_shaped():
+    """Whether lo has a qdisc of ours (tc via sudo -n, see run_one.py)."""
+    p = subprocess.run(["sudo", "-n", "tc", "qdisc", "show", "dev", "lo"], capture_output=True, text=True)
+    if p.returncode != 0:
+        raise SystemExit(f"sudo -n tc failed ({p.stderr.strip()}); allow tc in sudoers without a password")
+    return "htb" in p.stdout or "netem" in p.stdout
+
+
+def clear_lo(why):
+    if lo_shaped():
+        subprocess.run(["sudo", "-n", "tc", "qdisc", "del", "dev", "lo", "root"], capture_output=True)
+        log(f"tc: removed the qdisc on lo ({why})" + (", FAILED" if lo_shaped() else ""))
 
 
 def netns_count():
@@ -267,17 +321,47 @@ def warm_up(out, runs, resolution, warmup_s=30):
         log(f"warm-up: {scene} first frame after {first / 1e3:.1f} s")
 
 
+def meta(r):
+    return {k: r[k] for k in ("exp", "label", "trace_name", "offset_s", "shaper", "session", "session_index")}
+
+
+def shaper_args(r, trace_path):
+    if r["shaper"] == "tc-lo":
+        return ["--shaper", "tc-lo", "--tc-rates", trace_path]
+    return ["--trace", trace_path] if trace_path else []
+
+
+def client_args(s, r):
+    out = ["--scene", r["scene"], "--trajectory", r["trajectory"],
+           "--warmup", f"{s['warmup_s']:g}", "--resolution", s["resolution"]]
+    return out + (["--max-frames", str(r["max_viewpoints"])] if r["max_viewpoints"] else [])
+
+
 def run_one(cfg, out, r, trace_path):
     s = cfg["server"]
-    cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}",
-           "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"])]
-    if trace_path:
-        cmd += ["--trace", trace_path]
-    cmd += ["--", "--scene", r["scene"], "--trajectory", r["trajectory"], "--abr", r["abr"],
-            "--seed", str(r["rep"]), "--warmup", f"{s['warmup_s']:g}", "--resolution", s["resolution"]]
-    if r["max_viewpoints"]:
-        cmd += ["--max-frames", str(r["max_viewpoints"])]
-    rc, text = call(cmd, stop_group=False)
+    cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}", *shaper_args(r, trace_path),
+           "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"]),
+           "--", *client_args(s, r), "--abr", r["abr"], "--seed", str(r["seed"]),
+           "--meta", json.dumps(meta(r))]
+    return last_line(*call(cmd, stop_group=False))
+
+
+def run_session(cfg, out, unit, trace_path):
+    """All runs of a session in one client.py --session (one page, one rattan)."""
+    s, r = cfg["server"], unit[0]
+    sdir = os.path.join(out, r["unit"])
+    os.makedirs(sdir, exist_ok=True)
+    plan = [{"abr": x["abr"], "seed": x["seed"], "out": os.path.join(out, "runs", x["rel"]), "meta": meta(x)}
+            for x in unit]
+    json.dump(plan, open(os.path.join(sdir, "plan.json"), "w"), indent=1)
+    cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}", *shaper_args(r, trace_path),
+           "--timeout", str(s.get("session_timeout_s", 6000)), "--out", sdir,
+           "--", *client_args(s, r), "--session", os.path.join(sdir, "plan.json"),
+           "--gap-ms", f"{s.get('session_gap_ms', 150):g}"]
+    return last_line(*call(cmd, stop_group=False))
+
+
+def last_line(rc, text):
     lines = [l for l in text.splitlines() if l.startswith("run_one:")]
     return lines[-1][len("run_one: "):] if lines else f"exit {rc}: {text.strip()[-300:]}"
 
@@ -298,44 +382,71 @@ def run_matrix(cfg, out, runs, pending, args):
     if not args.skip_check:
         check_env(cfg, pending)
     traces = write_traces(cfg, out, runs)
+    tc_lo = any(r["shaper"] == "tc-lo" for r in pending)
+    if tc_lo:
+        clear_lo("before the runs")
+    units = units_of(pending)
     server = Server(out)
     failed = []
     try:
         server.start()
         warm_up(out, pending, cfg["server"]["resolution"])
-        for k, r in enumerate(pending, 1):
-            run_dir = os.path.join(out, "runs", r["rel"])
-            name = f"run {k}/{len(pending)} {r['rel']}"
+        for k, unit in enumerate(units, 1):
+            r = unit[0]
+            name = (f"session {k}/{len(units)} {r['unit']} ({len(unit)} runs)" if r["session"]
+                    else f"run {k}/{len(units)} {r['rel']}")
+            dirs = [os.path.join(out, "runs", x["rel"]) for x in unit] + ([os.path.join(out, r["unit"])]
+                                                                          if r["session"] else [])
             for attempt in (1, 2):
                 if not server.alive():
                     log("server: died; restarting")
                     server.start()
                     warm_up(out, pending, cfg["server"]["resolution"])
-                shutil.rmtree(run_dir, ignore_errors=True)
+                for d in dirs:
+                    shutil.rmtree(d, ignore_errors=True)
                 before, ns = experiment_procs(), netns_count()
                 t = time.time()
-                status = run_one(cfg, out, r, traces.get(r["trace_name"]))
+                path = traces.get((r["trace_name"], r["shaper"]))
+                status = run_session(cfg, out, unit, path) if r["session"] else run_one(cfg, out, r, path)
                 left = kill_new(before)
-                ok = is_done(run_dir, r["viewpoints"])
+                done = [is_done(os.path.join(out, "runs", x["rel"]), x["viewpoints"]) for x in unit]
+                ok = all(done)
                 log(f"{name} {'ok' if ok else 'FAILED'} ({time.time() - t:.0f} s): {status}")
+                if r["session"]:
+                    for x, d in zip(unit, done):
+                        log(f"  {x['rel']}: {'ok' if d else 'FAILED'} {run_brief(out, x)}")
                 if left:
                     log(f"  killed {len(left)} leftover processes after the run")
                 if netns_count() > ns:
                     log(f"  {netns_count() - ns} network namespaces left behind "
                         "(remove with sudo ip netns delete)")
+                if r["shaper"] == "tc-lo":
+                    clear_lo("left after the run")
                 if ok:
                     break
-                dst = os.path.join(out, "failed", r["rel"].replace(os.sep, "__")
-                                   + time.strftime("__%Y%m%d-%H%M%S"))
-                if os.path.exists(run_dir):
-                    shutil.move(run_dir, dst)
-                    log(f"  moved the attempt to {os.path.relpath(dst, out)}")
+                stamp = time.strftime("__%Y%m%d-%H%M%S")
+                for d in dirs:
+                    if os.path.exists(d):
+                        dst = os.path.join(out, "failed", os.path.relpath(d, out).replace(os.sep, "__") + stamp)
+                        shutil.move(d, dst)
+                        log(f"  moved the attempt to {os.path.relpath(dst, out)}")
             else:
-                failed.append(r["rel"])
+                failed += [x["rel"] for x in unit]
     finally:
         stop_child()
         server.stop()
+        if tc_lo:
+            clear_lo("after the runs")
     return failed
+
+
+def run_brief(out, r):
+    try:
+        run = json.load(open(os.path.join(out, "runs", r["rel"], "run.json")))
+        return (f"{run['frames']} frames in {(run['end_ms'] - run['start_ms']) / 1e3:.1f} s, "
+                f"profiles {list(run['profiles'].values())}")
+    except (OSError, ValueError, KeyError):
+        return "(no complete run.json)"
 
 
 def main():
@@ -362,6 +473,9 @@ def main():
 
     runs = plan_runs(cfg, a.only)
     pending = [r for r in runs if not is_done(os.path.join(out, "runs", r["rel"]), r["viewpoints"])]
+    # a session with any run left is run again as a whole
+    left = {r["unit"] for r in pending}
+    pending = [r for r in runs if r["unit"] in left]
     log(f"runs: {len(runs)} in the config, {len(runs) - len(pending)} already done, "
         f"{len(pending)} to run")
     failed = []
@@ -371,12 +485,14 @@ def main():
         else:
             write_traces(cfg, out, runs)
         s = cfg["server"]
-        for step, cmd in (
-                ("render_gt", ["exp/render_gt.py", out, "--stride", str(s["metric_stride"]),
-                               "--resolution", s["resolution"]]),
-                ("metrics", ["exp/metrics.py", out, "--stride", str(s["metric_stride"])]),
-                ("metrics_paper", ["exp/metrics_paper.py", out, "--stride", str(s["metric_stride"])]),
-                ("summarize", ["exp/summarize.py", out])):
+        steps = [("render_gt", ["exp/render_gt.py", out, "--stride", str(s["metric_stride"]),
+                                "--resolution", s["resolution"]]),
+                 ("metrics", ["exp/metrics.py", out, "--stride", str(s["metric_stride"])]),
+                 ("metrics_paper", ["exp/metrics_paper.py", out, "--stride", str(s["metric_stride"])]),
+                 ("summarize", ["exp/summarize.py", out])]
+        if not s.get("paper_metrics", True):
+            steps = [x for x in steps if x[0] != "metrics_paper"]
+        for step, cmd in steps:
             t = time.time()
             rc, text = call([sys.executable, *cmd])
             open(os.path.join(out, step + ".log"), "w").write(text)

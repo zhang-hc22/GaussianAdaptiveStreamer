@@ -7,10 +7,15 @@ Per frame (frames.ndjson; times in ms since t0):
 - render time: what the server reported;
 - transfer rate: (bytes - 1200) * 8 / (responseEnd - responseStart), frames
   of at least 3 kB only (as exp/phase2/check_trace.py).
+- wait: responseStart - send, until the first byte of the frame arrived;
+  download: responseEnd - responseStart.
 Per run: bandwidth used = all frame bytes / playback time; switches = frames
 whose profile differs from the previous frame; quality = mean over the
 frames in metrics/ (ours) and in metrics_paper/ (the paper's method,
-columns paper_<metric>).
+columns paper_<metric>); trace_mbps = mean bandwidth of the trace during
+playback; ghent_pos_s = second of the Ghent trace at the start of playback.
+Runs shaped by tc on lo (run_one.py --shaper tc-lo) use the times the rates
+actually took effect.
 
 Tables:
   summary/runs.csv        one row per run
@@ -41,7 +46,7 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from common import find_runs  # noqa: E402
+from common import REPO, find_runs  # noqa: E402
 from make_traces import segments  # noqa: E402
 
 ABRS = ["simple", "l2a", "lol+"]
@@ -54,30 +59,73 @@ MIN_BYTES = 3000
 KEYS = ["scene", "trajectory", "trace", "rtt_ms"]
 
 
+def shaping(run):
+    """RTT (ms), and when the trace and its Ghent part started (ms since t0)."""
+    if "tc" in run:
+        tc = run["tc"]
+        return tc["rtt_ms"], tc["trace_start_ms"], tc["ghent_start_ms"]
+    ra = run["rattan"]
+    ts = ra["trace_start_ms"]
+    return ra["rtt_ms"], ts, None if ts is None else ts + run["args"]["warmup"] * 1e3
+
+
+def bw_steps(results, r, run):
+    """(start of each rate in s since t0, rate in bps) of the run's trace, or
+    None without one."""
+    if "tc" in run:
+        st = np.array(run["tc"]["steps"]).reshape(-1, 2)
+        return st[:, 0] / 1e3, st[:, 1] * 1e3
+    if r["trace"] == "none" or run["rattan"]["trace_start_ms"] is None:
+        return None
+    path = run["rattan"].get("trace")
+    if not path or not os.path.exists(path):
+        path = os.path.join(results, "traces", r["trace"] + ".json")
+    segs = segments(path)
+    return (np.array([x[0] for x in segs]) + run["rattan"]["trace_start_ms"] / 1e3,
+            np.array([x[2] for x in segs], dtype=float))
+
+
+def mean_bw(steps, a, b):
+    """Mean of the step function steps over [a, b] (s since t0)."""
+    t, bw = steps
+    edges = np.append(t, np.inf)
+    span = np.clip(edges[1:], a, b) - np.clip(edges[:-1], a, b)
+    return float(np.sum(bw * span) / (b - a))
+
+
+def ghent_len(trace):
+    """Seconds in traces/<name>.csv of a trace label (bus_x8_phi -> bus)."""
+    path = os.path.join(REPO, "traces", trace.split("_x")[0] + ".csv")
+    return sum(1 for l in open(path) if l.strip()) if os.path.exists(path) else None
+
+
 def frame_table(r, run):
     fr = pd.DataFrame([json.loads(l) for l in open(os.path.join(r["dir"], "frames.ndjson"))])
     if "error" in fr:
         fr = fr[fr["error"].isna()].copy()
     fr["latency_ms"] = fr["drawn"] - fr["send"]
+    fr["wait_ms"] = fr["resp_start"] - fr["send"]
+    fr["download_ms"] = fr["resp_end"] - fr["resp_start"]
     fr["net_ms"] = fr["resp_end"] - fr["req_start"]
     dt = fr["resp_end"] - fr["resp_start"]
     big = (fr["bytes"] >= MIN_BYTES) & (dt > 0)
     fr["rate_mbps"] = np.where(big, (fr["bytes"] - 1200) * 8 / dt.where(dt > 0) / 1e3, np.nan)
     fr["t_s"] = (fr["send"] - run["start_ms"]) / 1e3
     # middle of the transfer at the bottleneck, as playback time
-    fr["rate_t_s"] = ((fr["resp_start"] + fr["resp_end"]) / 2 - run["rattan"]["rtt_ms"] / 2
+    fr["rate_t_s"] = ((fr["resp_start"] + fr["resp_end"]) / 2 - shaping(run)[0] / 2
                       - run["start_ms"]) / 1e3
     return fr
 
 
-def run_row(r, run, fr, q, qp):
+def run_row(r, run, fr, q, qp, steps):
     dur = (run["end_ms"] - run["start_ms"]) / 1e3
     row = {k: r[k] for k in KEYS + ["abr", "rep"]}
     row.update({
         "resolution": f"{run['camera']['width']}x{run['camera']['height']}", "seed": run["args"]["seed"], "viewpoints": run["viewpoints"], "failed": run["failed_frames"],
         "duration_s": dur, "fps": len(fr) / dur,
         "latency_ms": fr["latency_ms"].mean(), "latency_median_ms": fr["latency_ms"].median(),
-        "latency_p95_ms": fr["latency_ms"].quantile(0.95), "net_ms": fr["net_ms"].mean(),
+        "latency_p95_ms": fr["latency_ms"].quantile(0.95), "wait_ms": fr["wait_ms"].mean(),
+        "download_ms": fr["download_ms"].mean(), "net_ms": fr["net_ms"].mean(),
         "render_ms": fr["render_ms"].mean(), "bandwidth_mbps": fr["bytes"].sum() * 8 / dur / 1e6,
         "profile_mean": fr["profile"].mean(), "profile_median": fr["profile"].median(),
         "switches": int((fr["profile"].diff().fillna(0) != 0).sum()),
@@ -90,7 +138,16 @@ def run_row(r, run, fr, q, qp):
     for m in METRICS:
         row["paper_" + m] = qp[m].mean() if qp is not None else np.nan
     row["paper_other_profile"] = (qp["profile"] != qp["sent_profile"]).mean() if qp is not None else np.nan
-    row["trace_start_ms"] = run["rattan"]["trace_start_ms"]
+    _, row["trace_start_ms"], ghent_start = shaping(run)
+    row["trace_mbps"] = (mean_bw(steps, run["start_ms"] / 1e3, run["end_ms"] / 1e3) / 1e6
+                         if steps is not None else np.nan)
+    plan, n = run.get("plan") or {}, ghent_len(r["trace"])
+    row["offset_s"] = plan.get("offset_s", 0)
+    pos = ((run["start_ms"] - ghent_start) / 1e3 + row["offset_s"]
+           if steps is not None and ghent_start is not None and n else np.nan)
+    row["ghent_pos_s"] = pos % n if pos > 0 else pos   # slightly negative: before the Ghent part
+    row["session_index"] = plan.get("session_index") or np.nan
+    row["tc_lag_ms"] = run["tc"]["lag_ms"] if "tc" in run else np.nan
     row["tigas_commit"] = run["tigas_commit"]
     return row
 
@@ -186,18 +243,16 @@ def fig_rtt(frames, runs, path):
     plt.close(fig)
 
 
-def fig_timeseries(results, r, run, fr, path):
-    trace = r["trace"] != "none"
+def fig_timeseries(steps, run, fr, path):
+    trace = steps is not None
     rows = 3 if trace else 2
     fig, axes = plt.subplots(rows, 1, figsize=(10, 2.2 * rows), sharex=True)
     k = 0
     if trace:
         ax = axes[0]
-        segs = segments(os.path.join(results, "traces", r["trace"] + ".json"))
-        off = (run["rattan"]["trace_start_ms"] - run["start_ms"]) / 1e3
         end = fr["t_s"].max() + 1
-        t = np.array([s[0] for s in segs] + [segs[-1][1]]) + off
-        bw = np.array([s[2] for s in segs] + [segs[-1][2]]) / 1e6
+        t = steps[0] - run["start_ms"] / 1e3   # playback time
+        bw = steps[1] / 1e6
         keep = t <= end
         ax.step(t[keep], bw[keep], where="post", color="black", lw=0.8)
         for p in range(4):
@@ -205,7 +260,8 @@ def fig_timeseries(results, r, run, fr, path):
             ax.scatter(fr["rate_t_s"][m], fr["rate_mbps"][m], s=2, color=PROFILE_COLOR[p])
         # y range of the playback part; the warm-up segment, much higher, ends
         # a few ms after playback starts
-        seen = [x[2] / 1e6 for x in segs if x[1] + off > 0.5 and x[0] + off < end]
+        t_end = np.append(t[1:], np.inf)
+        seen = list(bw[(t_end > 0.5) & (t < end)])
         rates = fr["rate_mbps"].dropna()
         ax.set_ylim(0, 1.1 * max(seen + ([rates.quantile(0.99)] if len(rates) else [])))
         ax.set_ylabel("Mbit/s")
@@ -232,19 +288,20 @@ def main():
     found = find_runs(results)
     for r in found:
         run = json.load(open(os.path.join(r["dir"], "run.json")))
-        if run["status"] != "ok" or "rattan" not in run:
+        if run["status"] != "ok" or ("rattan" not in run and "tc" not in run):
             continue
         fr = frame_table(r, run)
         q, qp = (pd.read_csv(f) if os.path.exists(f) else None
                  for f in (os.path.join(results, d, r["rel"] + ".csv") for d in ("metrics", "metrics_paper")))
-        rows.append(run_row(r, run, fr, q, qp))
+        steps = bw_steps(results, r, run)
+        rows.append(run_row(r, run, fr, q, qp, steps))
         tag = {k: r[k] for k in KEYS + ["abr", "rep"]}
         frames.append(fr.assign(**tag))
         if q is not None:
             quality.append(q.assign(**tag))
         if qp is not None:
             quality_paper.append(qp.assign(**tag))
-        r["run"], r["fr"] = run, fr
+        r["run"], r["fr"], r["steps"] = run, fr, steps
     if not rows:
         raise SystemExit("summarize: no finished runs")
     runs = pd.DataFrame(rows)
@@ -283,7 +340,7 @@ def main():
         if "fr" not in r:
             continue
         name = f"{cond_name((r['scene'], r['trajectory'], r['trace'], r['rtt_ms']))}_{r['abr']}_rep{r['rep']}"
-        fig_timeseries(results, r, r["run"], r["fr"], os.path.join(figs, "timeseries", name + ".pdf"))
+        fig_timeseries(r["steps"], r["run"], r["fr"], os.path.join(figs, "timeseries", name + ".pdf"))
         written += 1
 
     show = ["trace", "rtt_ms", "abr", "runs", "duration_s", "latency_ms", "bandwidth_mbps",
