@@ -22,10 +22,19 @@ rtt_ms = [20]
 abrs = ["simple", "l2a", "lol+"]
 reps = 9
 
-[rtt]                    # paper figure 8; add RTT values to the list later
+[rtt_bus]                # paper figure 8 under the bus trace; 20 ms is in [ghent]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [5, 10, 40, 80]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3
+
+[rtt]                    # paper figure 8 without a bandwidth limit
 scenes = ["train"]
 trajectories = ["NTHU/train/user3_train.json"]
 traces = []
-rtt_ms = [20]
+rtt_ms = [5, 10, 20, 40, 80]
 abrs = ["simple", "l2a", "lol+"]
 reps = 3
