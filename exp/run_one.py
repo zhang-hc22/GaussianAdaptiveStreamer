@@ -210,7 +210,11 @@ def tc_lo_annotate(out, t0, rtt_ms, rates, warmup_s, stats):
         "ghent_start_ms": steps[int(warmup_s)][0] if len(steps) > warmup_s else None,
         "step_ms_mean": sum(gaps) / len(gaps) if gaps else None,
         "lag_ms": steps[-1][0] - steps[0][0] - 1e3 * (len(steps) - 1) if steps else None,
-        "errors": sum(1 for l in open(os.path.join(out, "tc_loop.log")) if len(l.split()) != 2),
+        # htb warns "quantum of class 10001 is big" above 32 Mbit/s (r2q 20); with one
+        # class the quantum does not matter
+        "warnings": sum(1 for l in open(os.path.join(out, "tc_loop.log")) if l.startswith("Warning:")),
+        "errors": sum(1 for l in open(os.path.join(out, "tc_loop.log"))
+                      if len(l.split()) != 2 and not l.startswith("Warning:")),
         **stats,
     })
 
