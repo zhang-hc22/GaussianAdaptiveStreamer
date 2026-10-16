@@ -2,20 +2,30 @@
 """Figures and tables of the ablations of exp/ablate.toml, from the
 summaries of exp/summarize.py.
 
-The baseline is bus x8 at RTT 20 ms in --base (r720 [ghent], 9 runs per
-ABR). The groups in --ablate are told apart by the trace label: bus_x8 (the
-baseline again with the new code), bus_x8_phi (A1), bus_x8_S1 to S3 (A2),
-bus_x8_tclo (A3). A4 compares bus_x8 and bus_x1 of --base at every RTT.
+Each ablation puts one of four parts of the experiment back to the way of
+the original code ("origin") and keeps the other three as we changed them.
+"revised" is our version: bus x8 at RTT 20 ms in --base (r720 [ghent], 9
+runs per ABR). The origin runs in --ablate are told apart by the trace
+label:
 
-For each group, ABR and metric: the difference of the means to the baseline
-and the ratio of the standard deviations, each with a bootstrap 95 %
-interval (10000 resamples of the runs of both groups). For A1 and A2 also
-P_flip: over all pairs of one run of ABR A and one of ABR B, the share whose
-order differs from the order of the two baseline means.
+  bus_x8_phi    trace alignment: playback starts phi s into the trace
+  bus_x8_S1..S3 restart: 27 runs in one page, the trace not restarted
+  bus_x8_tclo   shaper: tc on lo instead of rattan
+  bus_x8        revised again with the new code, as a check
+
+The bandwidth unit compares bus_x1 (origin) and bus_x8 (revised) of --base
+at every RTT.
+
+For each ablation, ABR and metric: the difference of the means (revised
+minus origin) and the ratio of the standard deviations (origin over
+revised), each with a bootstrap 95 % interval (10000 resamples of the runs
+of both). For trace alignment and restart also P_flip: over all pairs of
+one run of ABR A and one of ABR B, the share whose order differs from the
+order of the two revised means.
 
   python exp/ablation.py --base exp/results/r720 --ablate exp/results/ablate
 
-Writes <ablate>/figs/ablation/: the figures (PDF) and tables.md.
+Writes <ablate>/figs/ablation/: the figures (PDF and PNG) and tables.md.
 """
 import argparse
 import json
@@ -27,6 +37,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.ticker import NullFormatter, ScalarFormatter  # noqa: E402
 
 from common import REPO  # noqa: E402
@@ -40,17 +51,27 @@ TABLE = ["latency_ms", "profile_mean", "switches", "psnr", "ssim", "vmaf", "lpip
 MAIN = ["latency_ms", "profile_mean", "psnr"]
 PAIRS = [("simple", "l2a"), ("simple", "lol+"), ("l2a", "lol+")]
 SESSIONS = ["S1", "S2", "S3"]
+ORIGIN, REVISED = "origin", "revised"
 B = 10000
-RNG = np.random.default_rng(0)
+JITTER = np.random.default_rng(0)
+
+# fonts, lines and markers 1.5 times matplotlib's defaults
+SCALE = 1.5
+plt.rcParams.update({k: plt.rcParams[k] * SCALE for k in (
+    "font.size", "lines.linewidth", "lines.markersize", "axes.linewidth", "patch.linewidth",
+    "xtick.major.size", "xtick.major.width", "xtick.minor.size", "xtick.minor.width",
+    "ytick.major.size", "ytick.major.width", "ytick.minor.size", "ytick.minor.width")})
+DOT = 12 * SCALE ** 2   # scatter marker area
 
 
 # ---- statistics
 
 def boot(x, y, stat):
     """Bootstrap 95 % interval of stat(x, y), resampling x and y."""
+    rng = np.random.default_rng(0)
     x, y = np.asarray(x, float), np.asarray(y, float)
-    xs = x[RNG.integers(0, len(x), (B, len(x)))]
-    ys = y[RNG.integers(0, len(y), (B, len(y)))]
+    xs = x[rng.integers(0, len(x), (B, len(x)))]
+    ys = y[rng.integers(0, len(y), (B, len(y)))]
     with np.errstate(divide="ignore", invalid="ignore"):
         v = stat(xs, ys)
     v = v[np.isfinite(v)]
@@ -65,20 +86,21 @@ def std_ratio(x, y):
     return x.std(axis=-1, ddof=1) / y.std(axis=-1, ddof=1)
 
 
-def compare(base, grp, metrics=TABLE):
+def compare(revised, origin, metrics=TABLE):
     """One row per ABR and metric: means, stds, difference, ratio, intervals."""
     rows = []
     for abr in ABRS:
         for m in metrics:
-            x = grp[grp["abr"] == abr][m].dropna().to_numpy()
-            y = base[base["abr"] == abr][m].dropna().to_numpy()
-            if len(x) < 2 or len(y) < 2:
+            o = origin[origin["abr"] == abr][m].dropna().to_numpy()
+            r = revised[revised["abr"] == abr][m].dropna().to_numpy()
+            if len(o) < 2 or len(r) < 2:
                 continue
-            sx, sy = x.std(ddof=1), y.std(ddof=1)
-            rows.append({"ABR": LABEL[abr], "metric": m, "n": len(x), "baseline": y.mean(), "ablation": x.mean(),
-                         "diff": x.mean() - y.mean(), "diff 95%": tuple(boot(x, y, mean_diff)),
-                         "std base": sy, "std abl": sx, "ratio": sx / sy if sy > 0 else np.nan,
-                         "ratio 95%": tuple(boot(x, y, std_ratio))})
+            so, sr = o.std(ddof=1), r.std(ddof=1)
+            rows.append({"ABR": LABEL[abr], "metric": m, "n origin": len(o), "n revised": len(r),
+                         "origin": o.mean(), "revised": r.mean(), "revised - origin": r.mean() - o.mean(),
+                         "diff 95%": tuple(boot(r, o, mean_diff)), "std origin": so, "std revised": sr,
+                         "std origin / revised": so / sr if sr > 0 else np.nan,
+                         "ratio 95%": tuple(boot(o, r, std_ratio))})
     return pd.DataFrame(rows)
 
 
@@ -89,13 +111,13 @@ def p_flip(a, b, ref):
     return float(np.mean(np.sign(np.subtract.outer(np.asarray(a), np.asarray(b))) != ref))
 
 
-def flips(base, groups, metrics=MAIN):
+def flips(revised, groups, metrics=MAIN):
     rows = []
     for m in metrics:
         for a, b in PAIRS:
-            ref = np.sign(base[base["abr"] == a][m].mean() - base[base["abr"] == b][m].mean())
+            ref = np.sign(revised[revised["abr"] == a][m].mean() - revised[revised["abr"] == b][m].mean())
             row = {"metric": m, "pair": f"{LABEL[a]} vs {LABEL[b]}"}
-            for name, g in [("baseline", base)] + list(groups.items()):
+            for name, g in [(REVISED, revised)] + list(groups.items()):
                 row[name] = p_flip(g[g["abr"] == a][m].dropna(), g[g["abr"] == b][m].dropna(), ref)
             rows.append(row)
     return pd.DataFrame(rows)
@@ -105,6 +127,11 @@ def ranking(df, m):
     """ABRs from the lowest to the highest mean of m."""
     means = df.groupby("abr")[m].mean().sort_values()
     return " < ".join(LABEL[a] for a in means.index)
+
+
+def order(g):
+    """The ABR order of a session, e.g. Latency → L2A → LoL+."""
+    return " → ".join(LABEL[a] for a in g.groupby("abr")["session_index"].min().sort_values().index)
 
 
 # ---- tables as Markdown
@@ -166,124 +193,133 @@ def tc_counters(runs):
 
 # ---- figures
 
-def columns(ax, groups, m, names):
-    """Per ABR one column of points per group, the mean as a bar."""
-    G = len(groups)
-    ticks, labels = [], []
+def save(fig, path):
+    """PDF at path and a PNG next to it."""
+    fig.savefig(path)
+    fig.savefig(os.path.splitext(path)[0] + ".png", dpi=150)
+    plt.close(fig)
+
+
+def kinds(origin, revised):
+    """Legend entries: origin hollow, revised filled."""
+    return [Line2D([], [], ls="", marker="o", mfc="none", mec="black", label=origin),
+            Line2D([], [], ls="", marker="o", color="black", label=revised)]
+
+
+def abr_ticks(ax, names, G):
+    """Per ABR one tick per group (origin left), the ABR name above."""
+    ticks = [i * (G + 1) + j for i in range(len(ABRS)) for j in range(G)]
+    ax.set_xticks(ticks, names * len(ABRS), rotation=45, ha="right", rotation_mode="anchor")
     for i, abr in enumerate(ABRS):
-        for j, (name, g) in enumerate(zip(names, groups)):
+        ax.annotate(LABEL[abr], (i * (G + 1) + (G - 1) / 2, 1.01), xycoords=("data", "axes fraction"),
+                    ha="center", va="bottom", color=COLOR[abr], fontweight="bold")
+
+
+def columns(ax, groups, m):
+    """Per ABR one column of points per group, the mean as a black line.
+    Origin points hollow, revised filled."""
+    G = len(groups)
+    for i, abr in enumerate(ABRS):
+        for j, (name, g) in enumerate(groups.items()):
             x = i * (G + 1) + j
             v = g[g["abr"] == abr][m].dropna()
-            jit = (RNG.random(len(v)) - 0.5) * 0.3
-            ax.scatter(x + jit, v, s=12, color=COLOR[abr], alpha=1.0 if j else 0.5,
-                       marker="o" if j else "s", zorder=3)
+            jit = (JITTER.random(len(v)) - 0.5) * 0.3
+            filled = name == REVISED
+            ax.scatter(x + jit, v, s=DOT, facecolors=COLOR[abr] if filled else "none", edgecolors=COLOR[abr],
+                       linewidths=SCALE, zorder=3)
             if len(v):
-                ax.hlines(v.mean(), x - 0.35, x + 0.35, color="black", lw=1.2, zorder=4)
-            ticks.append(x)
-            labels.append(name)
-        ax.annotate(LABEL[abr], ((i * (G + 1) + (G - 1) / 2), -0.16), xycoords=("data", "axes fraction"),
-                    ha="center", va="top")
-    ax.set_xticks(ticks, labels, fontsize=7)
+                ax.hlines(v.mean(), x - 0.35, x + 0.35, color="black", lw=1.2 * SCALE, zorder=4)
+    abr_ticks(ax, list(groups), G)
     ax.set_ylabel(METRICS[m])
 
 
-def fig_columns(groups, names, path, metrics=MAIN):
-    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.2))
+def fig_columns(groups, path, metrics=MAIN):
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.6))
     for ax, m in zip(np.atleast_1d(axes), metrics):
-        columns(ax, groups, m, names)
+        columns(ax, groups, m)
     fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+    save(fig, path)
 
 
-def fig_bw_scatter(base, a1, path):
-    fig, axes = plt.subplots(1, 2, figsize=(9, 3.4))
-    for ax, m in zip(axes, ["profile_mean", "psnr"]):
+def fig_bw_scatter(revised, origin, path, metrics=MAIN):
+    """Each run against the trace bandwidth during its playback."""
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.6))
+    for ax, m in zip(axes, metrics):
         for abr in ABRS:
-            for g, mk, label in ((base, "x", "baseline"), (a1, "o", "A1")):
+            for g, filled in ((origin, False), (revised, True)):
                 v = g[g["abr"] == abr]
-                ax.scatter(v["trace_mbps"], v[m], s=16, marker=mk, color=COLOR[abr],
-                           label=f"{LABEL[abr]}, {label}")
-        ax.set_xlabel("trace bandwidth during playback (Mbit/s)")
+                ax.scatter(v["trace_mbps"], v[m], s=DOT, facecolors=COLOR[abr] if filled else "none",
+                           edgecolors=COLOR[abr], linewidths=SCALE)
+        ax.set_xlabel("trace bandwidth (Mbit/s)")
         ax.set_ylabel(METRICS[m])
-    h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="upper center", ncol=6, frameon=False, fontsize=7)
-    fig.tight_layout(rect=(0, 0, 1, 0.9))
-    fig.savefig(path)
-    plt.close(fig)
+    h = [Line2D([], [], ls="", marker="s", color=COLOR[a], label=LABEL[a]) for a in ABRS]
+    fig.legend(handles=h + kinds(ORIGIN, REVISED), loc="upper center", ncol=5, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    save(fig, path)
 
 
-def fig_session_order(groups, path):
-    fig, axes = plt.subplots(len(groups), 1, figsize=(9, 2.3 * len(groups)), sharex=True)
-    for ax, (name, g) in zip(np.atleast_1d(axes), groups.items()):
+def fig_session_order(sessions, revised, path):
+    """Mean latency of each run in the order of the session. The revised runs
+    of each ABR sit at the places of the origin runs of that ABR."""
+    fig, axes = plt.subplots(len(sessions), 1, figsize=(9, 2.6 * len(sessions) + 0.6), sharex=True, sharey=True)
+    tws = []
+    for ax, g in zip(np.atleast_1d(axes), sessions.values()):
         g = g.sort_values("session_index")
         tw = ax.twinx()
-        tw.plot(g["session_index"], g["trace_mbps"], color="grey", lw=1)
-        tw.set_ylabel("trace (Mbit/s)", color="grey")
+        tws.append(tw)
+        tw.plot(g["session_index"], g["trace_mbps"], color="grey")
         for abr in ABRS:
             v = g[g["abr"] == abr]
-            ax.scatter(v["session_index"], v["profile_mean"], s=14, color=COLOR[abr], zorder=3)
-            if len(v):
-                ax.annotate(LABEL[abr], (v["session_index"].mean(), 1.02), xycoords=("data", "axes fraction"),
-                            ha="center", va="bottom", fontsize=8, color=COLOR[abr])
-        ax.set_ylabel(f"{name}: mean profile")
+            r = revised[revised["abr"] == abr].sort_values("rep").head(len(v))
+            x = v["session_index"].to_numpy()[:len(r)]
+            ax.scatter(v["session_index"], v["latency_ms"], s=DOT, facecolors="none", edgecolors=COLOR[abr],
+                       linewidths=SCALE, zorder=3)
+            ax.scatter(x, r["latency_ms"], s=DOT, color=COLOR[abr], zorder=3)
+            tw.plot(x, r["trace_mbps"], color="grey", ls="--")
+            ax.annotate(LABEL[abr], (v["session_index"].mean(), 1.02), xycoords=("data", "axes fraction"),
+                        ha="center", va="bottom", color=COLOR[abr], fontweight="bold")
+        tw.set_ylabel("trace (Mbit/s)", color="grey")
+        ax.set_ylabel("latency (ms)")
         ax.set_zorder(tw.get_zorder() + 1)
         ax.patch.set_visible(False)
+    for tw in tws[1:]:
+        tw.sharey(tws[0])
     np.atleast_1d(axes)[-1].set_xlabel("run in the session")
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+    h = kinds(ORIGIN, REVISED) + [Line2D([], [], color="grey", label="trace, origin"),
+                                  Line2D([], [], color="grey", ls="--", label="trace, revised")]
+    fig.legend(handles=h, loc="upper center", ncol=4, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
+    save(fig, path)
 
 
-def fig_cdf(fb, ft, path):
-    """Per ABR: CDF of the per-frame latency, baseline black, tc + lo red."""
-    fig, axes = plt.subplots(1, 3, figsize=(10, 3), sharex=True, sharey=True)
+def fig_cdf(fo, fr, path):
+    """Per ABR: CDF of the per-frame latency, origin (tc + lo) red dashed, revised (rattan) black."""
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.6), sharex=True, sharey=True)
     for ax, abr in zip(axes, ABRS):
-        for f, color in ((fb, "black"), (ft, "#d62728")):
+        for f, color, ls in ((fr, "black", "-"), (fo, "#d62728", "--")):
             v = np.sort(f[f["abr"] == abr]["latency_ms"].dropna().to_numpy())
             if len(v):
-                ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=color, lw=1)
+                ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=color, ls=ls)
         ax.set_xscale("log")
-        ax.set_xticks([20, 50, 100, 200, 500, 1000])
+        ax.set_xticks([20, 50, 100, 300, 1000])
         ax.xaxis.set_major_formatter(ScalarFormatter())
         ax.xaxis.set_minor_formatter(NullFormatter())
-        ax.set_xlabel(f"{LABEL[abr]}: latency per frame (ms)")
+        ax.set_xlabel(f"{LABEL[abr]}: latency (ms)")
     axes[0].set_ylabel("CDF")
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+    h = [Line2D([], [], color="#d62728", ls="--", label="origin: tc + lo"),
+         Line2D([], [], color="black", label="revised: rattan")]
+    fig.legend(handles=h, loc="upper center", ncol=2, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    save(fig, path)
 
 
-def fig_bars(groups, names, path, metrics=("latency_ms", "profile_mean", "psnr", "switches")):
-    fig, axes = plt.subplots(1, len(metrics), figsize=(3.4 * len(metrics), 3))
-    G = len(groups)
-    for ax, m in zip(axes, metrics):
-        ticks, labels = [], []
-        for i, abr in enumerate(ABRS):
-            for j, (name, g) in enumerate(zip(names, groups)):
-                x = i * (G + 1) + j
-                v = g[g["abr"] == abr][m].dropna()
-                ax.bar(x, v.mean(), yerr=v.std(ddof=1), width=0.8, color=COLOR[abr], alpha=0.45 if j == 0 else 0.9,
-                       capsize=3)
-                ticks.append(x)
-                labels.append(name)
-            ax.annotate(LABEL[abr], (i * (G + 1) + (G - 1) / 2, -0.16), xycoords=("data", "axes fraction"),
-                        ha="center", va="top", fontsize=8)
-        ax.set_xticks(ticks, labels, fontsize=7)
-        ax.set_ylabel(METRICS[m])
-    fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
-
-
-def fig_split(fb, ft, path):
+def fig_split(fo, fr, path):
     """Mean wait, download and the rest of the per-frame latency, stacked."""
-    fig, ax = plt.subplots(figsize=(6, 3.2))
-    ticks, labels = [], []
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
     parts = [("wait_ms", "wait for first byte", "#4c72b0"), ("download_ms", "download", "#dd8452"),
              ("rest_ms", "decode and draw", "#bbbbbb")]
     for i, abr in enumerate(ABRS):
-        for j, (name, f) in enumerate((("base", fb), ("tc", ft))):
+        for j, f in enumerate((fo, fr)):
             f = f[f["abr"] == abr]
             vals = {"wait_ms": f["wait_ms"].mean(), "download_ms": f["download_ms"].mean()}
             vals["rest_ms"] = f["latency_ms"].mean() - vals["wait_ms"] - vals["download_ms"]
@@ -291,141 +327,142 @@ def fig_split(fb, ft, path):
             for k, label, color in parts:
                 ax.bar(x, vals[k], bottom=bottom, width=0.8, color=color, label=label if x == 0 else None)
                 bottom += vals[k]
-            ticks.append(x)
-            labels.append(name)
-        ax.annotate(LABEL[abr], (i * 3 + 0.5, -0.16), xycoords=("data", "axes fraction"), ha="center", va="top")
-    ax.set_xticks(ticks, labels, fontsize=8)
+    abr_ticks(ax, [ORIGIN, REVISED], 2)
     ax.set_ylabel("mean per frame (ms)")
-    fig.legend(loc="upper center", ncol=3, frameon=False, fontsize=8)
-    fig.tight_layout(rect=(0, 0, 1, 0.9))
-    fig.savefig(path)
-    plt.close(fig)
+    fig.legend(loc="upper center", ncol=3, frameon=False, fontsize="small")
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    save(fig, path)
 
 
 def fig_trace_units(path, name="bus", seconds=200):
     v = np.array([float(l) for l in open(os.path.join(REPO, "traces", f"{name}.csv")) if l.strip()][:seconds])
-    fig, ax = plt.subplots(figsize=(8, 2.8))
+    fig, ax = plt.subplots(figsize=(8, 3.2))
     t = np.arange(len(v) + 1)
-    for scale, ls in ((8, "-"), (1, "--")):
+    for scale, ls, label in ((8, "-", f"{REVISED} ×8"), (1, "--", f"{ORIGIN} ×1")):
         y = np.append(v, v[-1]) * scale / 1000
-        ax.step(t, y, where="post", ls=ls, color="black", lw=0.9)
-        ax.annotate(f"×{scale}", (seconds, y[-1]), xytext=(4, 0), textcoords="offset points", va="center")
+        ax.step(t, y, where="post", ls=ls, color="black")
+        ax.annotate(label, (seconds, y[-1]), xytext=(4, 0), textcoords="offset points", va="center")
     ax.set_yscale("log")
+    ax.set_yticks([0.5, 1, 2, 5, 10, 20, 50])
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_minor_formatter(NullFormatter())
     ax.set_xlabel("time (s)")
     ax.set_ylabel("Mbit/s")
     ax.set_xlim(0, seconds)
     fig.tight_layout()
-    fig.savefig(path)
-    plt.close(fig)
+    save(fig, path)
 
 
 def fig_units_rtt(runs, path, metrics=("latency_ms", "profile_mean", "psnr", "switches")):
-    fig, axes = plt.subplots(1, len(metrics), figsize=(3.4 * len(metrics), 3))
+    """Each metric against the RTT, origin (x1) dashed, revised (x8) solid."""
+    fig, axes = plt.subplots(1, len(metrics), figsize=(3.4 * len(metrics), 3.6))
     for ax, m in zip(axes, metrics):
         for abr in ABRS:
-            for trace, ls in (("bus_x8", "-"), ("bus_x1", "--")):
+            for trace, ls in (("bus_x1", "--"), ("bus_x8", "-")):
                 g = runs[(runs["abr"] == abr) & (runs["trace"] == trace)].groupby("rtt_ms")[m]
                 if not len(g.mean()):
                     continue
-                ax.errorbar(g.mean().index, g.mean(), yerr=g.std().fillna(0), ls=ls, marker="o", ms=3,
-                            capsize=2, color=COLOR[abr], label=f"{LABEL[abr]} ×{trace[-1]}")
+                ax.errorbar(g.mean().index, g.mean(), yerr=g.std().fillna(0), ls=ls, marker="o", ms=3 * SCALE,
+                            capsize=2 * SCALE, color=COLOR[abr])
         ax.set_xscale("log")
         rtts = sorted(set(runs["rtt_ms"]))
         ax.set_xticks(rtts, [f"{r:g}" for r in rtts])
         ax.minorticks_off()
         ax.set_xlabel("RTT (ms)")
         ax.set_ylabel(METRICS[m])
-    h, l = axes[0].get_legend_handles_labels()
-    fig.legend(h, l, loc="upper center", ncol=6, frameon=False, fontsize=8)
-    fig.tight_layout(rect=(0, 0, 1, 0.88))
-    fig.savefig(path)
-    plt.close(fig)
+    h = [Line2D([], [], color=COLOR[a], label=LABEL[a]) for a in ABRS]
+    h += [Line2D([], [], color="black", ls="--", label=f"{ORIGIN} ×1"),
+          Line2D([], [], color="black", label=f"{REVISED} ×8")]
+    fig.legend(handles=h, loc="upper center", ncol=5, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    save(fig, path)
 
 
 # ---- main
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--base", required=True, help="results with the baseline and A4 (r720)")
+    ap.add_argument("--base", required=True, help="results with the revised runs and the bandwidth unit (r720)")
     ap.add_argument("--ablate", required=True, help="results of exp/ablate.toml")
     ap.add_argument("--rtt", type=float, default=20)
     a = ap.parse_args()
     r720, abl = load(os.path.abspath(a.base)), load(os.path.abspath(a.ablate))
     out = os.path.join(os.path.abspath(a.ablate), "figs", "ablation")
     os.makedirs(out, exist_ok=True)
-    base = r720[(r720["trace"] == "bus_x8") & (r720["rtt_ms"] == a.rtt)]
+    rev = r720[(r720["trace"] == "bus_x8") & (r720["rtt_ms"] == a.rtt)]
     abl = abl[abl["rtt_ms"] == a.rtt]
     grp = {t: abl[abl["trace"] == t] for t in sorted(set(abl["trace"]))}
-    text = [f"# Ablation tables\n\nBaseline: {a.base}, bus_x8, RTT {a.rtt:g} ms, "
-            f"{base.groupby('abr').size().to_dict()} runs.\n"]
+    text = [f"# Ablation tables\n\norigin: one part as in the original code, the other three as revised. "
+            f"revised: {a.base}, bus_x8, RTT {a.rtt:g} ms, {rev.groupby('abr').size().to_dict()} runs. "
+            f"Differences are revised minus origin, ratios of the standard deviations origin over revised.\n"]
 
-    # baseline again with the new code: its means within the range of the baseline runs?
+    # revised again with the new code: its means within the range of the revised runs?
     if "bus_x8" in grp:
         rows = []
         for abr in ABRS:
             for m in TABLE + ["wait_ms", "download_ms"]:
-                y, x = base[base["abr"] == abr][m], grp["bus_x8"][grp["bus_x8"]["abr"] == abr][m]
+                y, x = rev[rev["abr"] == abr][m], grp["bus_x8"][grp["bus_x8"]["abr"] == abr][m]
                 if len(x) and len(y):
-                    rows.append({"ABR": LABEL[abr], "metric": m, "baseline min": y.min(), "baseline max": y.max(),
-                                 "new mean": x.mean(), "within": bool(y.min() <= x.mean() <= y.max())})
-        text += ["## Baseline again\n", md(pd.DataFrame(rows))]
+                    rows.append({"ABR": LABEL[abr], "metric": m, "revised min": y.min(), "revised max": y.max(),
+                                 "new code mean": x.mean(), "within": bool(y.min() <= x.mean() <= y.max())})
+        text += ["## Revised again with the new code\n", md(pd.DataFrame(rows))]
 
-    # A1
+    # trace alignment
     if "bus_x8_phi" in grp:
-        a1 = grp["bus_x8_phi"]
-        fig_columns([base, a1], ["base", "A1"], os.path.join(out, "a1_1_columns.pdf"))
-        fig_bw_scatter(base, a1, os.path.join(out, "a1_2_bandwidth.pdf"))
-        text += ["## A1 (playback starts phi s into the trace)\n", md(compare(base, a1)),
-                 "\nP_flip\n\n", md(flips(base, {"A1": a1}))]
+        o = grp["bus_x8_phi"]
+        fig_columns({ORIGIN: o, REVISED: rev}, os.path.join(out, "align_columns.pdf"))
+        fig_bw_scatter(rev, o, os.path.join(out, "align_bandwidth.pdf"))
+        text += ["## Trace alignment (origin: playback starts phi s into the trace)\n", md(compare(rev, o)),
+                 "\nP_flip\n\n", md(flips(rev, {ORIGIN: o}))]
 
-    # A2
+    # restart for every run
     sess = {s: grp[f"bus_x8_{s}"] for s in SESSIONS if f"bus_x8_{s}" in grp}
     if sess:
-        fig_columns([base] + list(sess.values()), ["base"] + list(sess), os.path.join(out, "a2_1_columns.pdf"))
-        fig_session_order(sess, os.path.join(out, "a2_2_order.pdf"))
-        text.append("## A2 (sessions)\n")
-        for s, g in sess.items():
-            text += [f"\n### {s}\n\n", md(compare(base, g))]
         allg = pd.concat(sess.values())
-        text += ["\n### S1 to S3 together\n\n", md(compare(base, allg)), "\nP_flip\n\n",
-                 md(flips(base, dict(sess, **{"S1-S3": allg})))]
-        rank = [{"metric": m, "baseline": ranking(base, m), **{s: ranking(g, m) for s, g in sess.items()}}
+        fig_columns({ORIGIN: allg, REVISED: rev}, os.path.join(out, "restart_columns.pdf"))
+        fig_session_order(sess, rev, os.path.join(out, "restart_order.pdf"))
+        text.append("## Restart for every run (origin: 27 runs in one page, the trace not restarted)\n")
+        for s, g in sess.items():
+            text += [f"\n### {s}: {order(g)}\n\n", md(compare(rev, g))]
+        text += ["\n### S1 to S3 together\n\n", md(compare(rev, allg)), "\nP_flip\n\n",
+                 md(flips(rev, dict({f"{ORIGIN} {s}": g for s, g in sess.items()}, **{f"{ORIGIN} S1-S3": allg})))]
+        rank = [{"metric": m, REVISED: ranking(rev, m), **{f"{ORIGIN} {s}": ranking(g, m) for s, g in sess.items()}}
                 for m in MAIN]
         text += ["\nOrder of the ABR means (lowest first)\n\n", md(pd.DataFrame(rank))]
         bw = pd.concat([g.assign(session=s) for s, g in sess.items()]).groupby(["session", "abr"])["trace_mbps"]
         text += ["\nTrace bandwidth during the runs (Mbit/s)\n\n",
                  md(bw.agg(["mean", "std", "min", "max"]).reset_index())]
 
-    # A3
+    # shaper
     if "bus_x8_tclo" in grp:
-        a3 = grp["bus_x8_tclo"]
-        fb, ft = frames_of(base), frames_of(a3)
-        fig_cdf(fb, ft, os.path.join(out, "a3_1_latency_cdf.pdf"))
-        fig_bars([base, a3], ["base", "tc"], os.path.join(out, "a3_2_bars.pdf"))
-        fig_split(fb, ft, os.path.join(out, "a3_3_latency_split.pdf"))
+        o = grp["bus_x8_tclo"]
+        fr, fo = frames_of(rev), frames_of(o)
+        fig_cdf(fo, fr, os.path.join(out, "shaper_cdf.pdf"))
+        fig_columns({ORIGIN: o, REVISED: rev}, os.path.join(out, "shaper_columns.pdf"))
+        fig_split(fo, fr, os.path.join(out, "shaper_split.pdf"))
         pct = []
-        for name, f in (("baseline", fb), ("tc + lo", ft)):
+        for name, f in ((f"{ORIGIN} (tc + lo)", fo), (f"{REVISED} (rattan)", fr)):
             for abr in ABRS:
                 v = f[f["abr"] == abr]["latency_ms"]
                 pct.append({"setting": name, "ABR": LABEL[abr], "p50": v.quantile(0.5), "p90": v.quantile(0.9),
                             "p99": v.quantile(0.99), "max": v.max()})
-        text += ["## A3 (tc + lo)\n", md(compare(base, a3, TABLE + ["wait_ms", "download_ms"])),
+        text += ["## Shaper (origin: tc on lo)\n", md(compare(rev, o, TABLE + ["wait_ms", "download_ms"])),
                  "\nPer-frame latency (ms)\n\n", md(pd.DataFrame(pct)),
-                 "\nRate loop and tc counters\n\n", md(tc_counters(a3))]
+                 "\nRate loop and tc counters of the origin runs\n\n", md(tc_counters(o))]
 
-    # A4
-    fig_trace_units(os.path.join(out, "a4_1_trace.pdf"))
+    # bandwidth unit
+    fig_trace_units(os.path.join(out, "units_trace.pdf"))
     units = r720[r720["trace"].isin(["bus_x8", "bus_x1"])]
     if len(units):
-        fig_units_rtt(units, os.path.join(out, "a4_2_rtt.pdf"))
+        fig_units_rtt(units, os.path.join(out, "units_rtt.pdf"))
         rows = []
         for rtt in sorted(set(units["rtt_ms"])):
             for m in ("latency_ms", "profile_mean", "psnr", "switches"):
                 u = units[units["rtt_ms"] == rtt]
-                r8, r1 = ranking(u[u["trace"] == "bus_x8"], m), ranking(u[u["trace"] == "bus_x1"], m)
+                r1, r8 = ranking(u[u["trace"] == "bus_x1"], m), ranking(u[u["trace"] == "bus_x8"], m)
                 rows.append({"RTT (ms)": rtt, "metric": m, "runs": int(u.groupby(["trace", "abr"]).size().min()),
-                             "x8": r8, "x1": r1, "same": r8 == r1})
-        text += ["## A4 (x8 against x1)\n", md(pd.DataFrame(rows))]
+                             f"{ORIGIN} x1": r1, f"{REVISED} x8": r8, "same": r1 == r8})
+        text += ["## Bandwidth unit (origin: x1)\n", md(pd.DataFrame(rows))]
 
     open(os.path.join(out, "tables.md"), "w").write("\n".join(text))
     print(f"ablation: figures and tables.md in {out}")
