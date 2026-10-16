@@ -207,8 +207,7 @@ def fig_cdf(lat, path):
         ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel(f"{name}: latency (ms)")
     axes[0].set_ylabel("CDF")
-    legend(fig)
-    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    fig.tight_layout()   # no legend on CDFs: the colours are those of columns.pdf
     save(fig, path)
 
 
