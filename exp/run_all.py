@@ -29,6 +29,10 @@ exp/ablate.toml); the run directories then get a suffix after the trace:
   suffix _<session>. A session is run, retried and kept as a whole;
 - shaper = "tc-lo": tc on lo instead of rattan (run_one.py --shaper tc-lo);
   suffix _tclo. The qdisc on lo is removed before and after the matrix.
+A table with mode = "wt" plays through /player-wt, the WebTransport push
+mode (client.py --mode wt, abrs = ["throughput"], event_ms = 40). The
+server keeps rendering for a WebTransport session that was not closed
+(gs_app.TimedSend), so it is restarted before every such run.
 
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
 
@@ -95,7 +99,8 @@ def plan_runs(cfg, only):
                 off = offsets[rep - 1] if offsets else 0
                 label = (trace_name(trace, scale) + ("_phi" if offsets else "")
                          + (f"_{sname}" if sname else "") + ("_tclo" if shaper == "tc-lo" else ""))
-                r = {"exp": name, "scene": scene, "trajectory": traj, "trace": trace,
+                r = {"exp": name, "mode": t.get("mode", "player"), "event_ms": t.get("event_ms", 40),
+                     "scene": scene, "trajectory": traj, "trace": trace,
                      "scale": scale, "trace_name": trace_name(trace, scale) + (f"_phi{off}" if off else ""),
                      "label": label, "offset_s": off, "shaper": shaper, "rtt_ms": rtt,
                      "abr": abr, "rep": rep, "seed": rep,
@@ -322,7 +327,8 @@ def warm_up(out, runs, resolution, warmup_s=30):
 
 
 def meta(r):
-    return {k: r[k] for k in ("exp", "label", "trace_name", "offset_s", "shaper", "session", "session_index")}
+    return {k: r[k] for k in ("exp", "mode", "label", "trace_name", "offset_s", "shaper", "session",
+                              "session_index")}
 
 
 def shaper_args(r, trace_path):
@@ -334,6 +340,8 @@ def shaper_args(r, trace_path):
 def client_args(s, r):
     out = ["--scene", r["scene"], "--trajectory", r["trajectory"],
            "--warmup", f"{s['warmup_s']:g}", "--resolution", s["resolution"]]
+    if r["mode"] == "wt":
+        out += ["--mode", "wt", "--event-ms", f"{r['event_ms']:g}"]
     return out + (["--max-frames", str(r["max_viewpoints"])] if r["max_viewpoints"] else [])
 
 
@@ -387,7 +395,7 @@ def run_matrix(cfg, out, runs, pending, args):
         clear_lo("before the runs")
     units = units_of(pending)
     server = Server(out)
-    failed = []
+    failed, used = [], False
     try:
         server.start()
         warm_up(out, pending, cfg["server"]["resolution"])
@@ -398,10 +406,15 @@ def run_matrix(cfg, out, runs, pending, args):
             dirs = [os.path.join(out, "runs", x["rel"]) for x in unit] + ([os.path.join(out, r["unit"])]
                                                                           if r["session"] else [])
             for attempt in (1, 2):
-                if not server.alive():
+                if r["mode"] == "wt" and used:
+                    server.stop()
+                    server.start()
+                    warm_up(out, pending, cfg["server"]["resolution"])
+                elif not server.alive():
                     log("server: died; restarting")
                     server.start()
                     warm_up(out, pending, cfg["server"]["resolution"])
+                used = True
                 for d in dirs:
                     shutil.rmtree(d, ignore_errors=True)
                 before, ns = experiment_procs(), netns_count()

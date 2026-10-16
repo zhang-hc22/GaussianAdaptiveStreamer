@@ -9,6 +9,13 @@ Per frame (frames.ndjson; times in ms since t0):
   of at least 3 kB only (as exp/phase2/check_trace.py).
 - wait: responseStart - send, until the first byte of the frame arrived;
   download: responseEnd - responseStart.
+Runs of the WebTransport push mode (client.py --mode wt) have one line per
+viewpoint with the first frame drawn for it: latency = drawn - send, from
+setting the viewpoint to drawing its first frame; network time = drawn - msg,
+from the pose message the frame was rendered from; wait = first chunk - send;
+download = first to last chunk. Viewpoints never shown are left out like
+failed frames; fps counts every frame drawn and bandwidth every byte received
+(run.json "wt").
 Per run: bandwidth used = all frame bytes / playback time; switches = frames
 whose profile differs from the previous frame; quality = mean over the
 frames in metrics/ (ours) and in metrics_paper/ (the paper's method,
@@ -49,9 +56,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 from common import REPO, find_runs  # noqa: E402
 from make_traces import segments  # noqa: E402
 
-ABRS = ["simple", "l2a", "lol+"]
-LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+"}   # names in the paper
-COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3"}
+ABRS = ["simple", "l2a", "lol+", "throughput"]
+LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+",   # names in the paper
+         "throughput": "Throughput (WT)"}
+COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3", "throughput": "#e7298a"}
 PROFILE_COLOR = ["#253494", "#2c7fb8", "#41b6c4", "#a1dab4"]
 METRICS = {"psnr": "PSNR (dB)", "ssim": "SSIM", "vmaf": "VMAF", "vif": "VIF",
            "lpips": "LPIPS", "dists": "DISTS"}
@@ -104,16 +112,19 @@ def frame_table(r, run):
     if "error" in fr:
         fr = fr[fr["error"].isna()].copy()
     fr["latency_ms"] = fr["drawn"] - fr["send"]
-    fr["wait_ms"] = fr["resp_start"] - fr["send"]
-    fr["download_ms"] = fr["resp_end"] - fr["resp_start"]
-    fr["net_ms"] = fr["resp_end"] - fr["req_start"]
-    dt = fr["resp_end"] - fr["resp_start"]
+    if run["args"].get("mode") == "wt":
+        first, last, sent = fr["first"], fr["drawn"], fr["msg"]
+    else:
+        first, last, sent = fr["resp_start"], fr["resp_end"], fr["req_start"]
+    fr["wait_ms"] = first - fr["send"]
+    fr["download_ms"] = last - first
+    fr["net_ms"] = last - sent
+    dt = last - first
     big = (fr["bytes"] >= MIN_BYTES) & (dt > 0)
     fr["rate_mbps"] = np.where(big, (fr["bytes"] - 1200) * 8 / dt.where(dt > 0) / 1e3, np.nan)
     fr["t_s"] = (fr["send"] - run["start_ms"]) / 1e3
     # middle of the transfer at the bottleneck, as playback time
-    fr["rate_t_s"] = ((fr["resp_start"] + fr["resp_end"]) / 2 - shaping(run)[0] / 2
-                      - run["start_ms"]) / 1e3
+    fr["rate_t_s"] = ((first + last) / 2 - shaping(run)[0] / 2 - run["start_ms"]) / 1e3
     return fr
 
 
@@ -127,9 +138,13 @@ def run_row(r, run, fr, q, qp, steps):
         "latency_p95_ms": fr["latency_ms"].quantile(0.95), "wait_ms": fr["wait_ms"].mean(),
         "download_ms": fr["download_ms"].mean(), "net_ms": fr["net_ms"].mean(),
         "render_ms": fr["render_ms"].mean(), "bandwidth_mbps": fr["bytes"].sum() * 8 / dur / 1e6,
+        "shown": len(fr) / run["viewpoints"],
         "profile_mean": fr["profile"].mean(), "profile_median": fr["profile"].median(),
         "switches": int((fr["profile"].diff().fillna(0) != 0).sum()),
     })
+    if "wt" in run:
+        row["fps"] = run["wt"]["drawn_in_playback"] / dur
+        row["bandwidth_mbps"] = run["wt"]["bytes"] * 8 / dur / 1e6
     for p in range(4):
         row[f"share_p{p}"] = (fr["profile"] == p).mean()
     for m in METRICS:
