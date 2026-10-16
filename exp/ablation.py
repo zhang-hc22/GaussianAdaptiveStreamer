@@ -27,6 +27,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import NullFormatter, ScalarFormatter  # noqa: E402
 
 from common import REPO  # noqa: E402
 from summarize import ABRS, COLOR, LABEL  # noqa: E402
@@ -236,13 +237,16 @@ def fig_session_order(groups, path):
 
 def fig_cdf(fb, ft, path):
     """Per ABR: CDF of the per-frame latency, baseline black, tc + lo red."""
-    fig, axes = plt.subplots(1, 3, figsize=(10, 3), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3), sharex=True, sharey=True)
     for ax, abr in zip(axes, ABRS):
         for f, color in ((fb, "black"), (ft, "#d62728")):
             v = np.sort(f[f["abr"] == abr]["latency_ms"].dropna().to_numpy())
             if len(v):
                 ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=color, lw=1)
         ax.set_xscale("log")
+        ax.set_xticks([20, 50, 100, 200, 500, 1000])
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel(f"{LABEL[abr]}: latency per frame (ms)")
     axes[0].set_ylabel("CDF")
     fig.tight_layout()
