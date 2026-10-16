@@ -56,7 +56,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from common import REPO, find_runs  # noqa: E402
 from make_traces import segments  # noqa: E402
 
-ABRS = ["simple", "l2a", "lol+", "throughput"]
+ABRS = ["simple", "l2a", "lol+"]   # /player; abrs_in() puts others after them
 LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+",   # names in the paper
          "throughput": "Throughput (WT)"}
 COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3", "throughput": "#e7298a"}
