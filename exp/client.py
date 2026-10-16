@@ -34,6 +34,24 @@ frame of it was drawn), wt_frames.ndjson one line per frame of the playback
 and wt_sends.json the pose messages [time, viewpoint, profile]. At the end
 the page sends the server the message it sends on beforeunload, so the server
 stops rendering for it.
+
+With --mode webrtc it opens a blank page and runs exp/runner_webrtc.js: the
+page signs in to peerconnection_server at --server:--signaling-port, takes
+the offer of tigas_sender (run_one.py starts both), warms up from the moment
+the DataChannel opens to t0 + W (--warmup-mode) and sends the viewpoints with
+--pacing. Each viewpoint is rendered at profile 0 and --resolution with the
+camera /player uses after Apply (fx 1300, fy 800, cx and cy half the size).
+frames.ndjson has one line per viewpoint: send, dec (its first frame read
+from the track; drawn is the same time, for the scripts that read drawn),
+shown (that frame's presentationTime from requestVideoFrameCallback, if it
+was presented), recv (the receiveTime requestVideoFrameCallback gives for
+that frame; track frames carry none, so viewpoints never presented have no
+recv), rtp_ts, render_ms, t_push (frame
+handed to the encoder, sender clock = page clock on one host); "error":
+"no frame" or "timeout" if none was read. webrtc_frames.ndjson has every
+frame read, webrtc_warmup.ndjson the warm-up messages, webrtc_shown.ndjson
+the presented frames, receiver_stats.ndjson getStats every 100 ms, and
+frames/<i>.yuv the I420 of every 12th viewpoint.
 """
 import argparse
 import base64
@@ -46,7 +64,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-from common import REPO, chromium_args, git_commit
+from common import REPO, chromium_args, git_commit, webrtc_chromium_args
 
 FIRST_FRAME_JS = "() => document.getElementById('stage_placeholder')?.style.display === 'none'"
 FIRST_FRAME_WT_JS = "() => window.TIGAS && window.TIGAS.last !== null"
@@ -69,8 +87,20 @@ def main():
     ap.add_argument("--port", type=int, default=4433)
     ap.add_argument("--scene", default="train")
     ap.add_argument("--trajectory", required=True, help="path, or relative to TestMovements/")
-    ap.add_argument("--mode", choices=["player", "wt"], default="player",
-                    help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push")
+    ap.add_argument("--mode", choices=["player", "wt", "webrtc"], default="player",
+                    help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push; "
+                    "webrtc: tigas_sender over WebRTC")
+    ap.add_argument("--signaling-port", type=int, default=8888, help="--mode webrtc: peerconnection_server")
+    ap.add_argument("--pacing", choices=["tms", "closed"], default="tms",
+                    help="--mode webrtc: tms sends viewpoint i at t0 + W + tMs_i; closed sends the next "
+                    "one when the frame of the previous one has been read")
+    ap.add_argument("--warmup-mode", choices=["reverse", "pose0"], default="reverse",
+                    help="--mode webrtc: what the page sends before t0 + W (exp/runner_webrtc.js)")
+    ap.add_argument("--closed-timeout-ms", type=float, default=2000,
+                    help="--pacing closed: send the next viewpoint after this long without a frame")
+    ap.add_argument("--save-every", type=int, default=12, help="--mode webrtc: save every Nth viewpoint's frame")
+    ap.add_argument("--no-display", action="store_true",
+                    help="--mode webrtc: no <video> element, so no requestVideoFrameCallback times")
     ap.add_argument("--abr", choices=["simple", "l2a", "lol+", "throughput"],
                     help="required without --session; throughput (ThroughputABR) is the one of --mode wt")
     ap.add_argument("--event-ms", type=float, default=40, help="--mode wt: one viewpoint every N ms")
@@ -91,6 +121,10 @@ def main():
     ap.add_argument("--verbose-console", action="store_true",
                     help="keep the ABRs' console.log (off by default)")
     a = ap.parse_args()
+    if a.mode == "webrtc":
+        if a.session:
+            ap.error("--mode webrtc plays one run")
+        a.abr = a.abr or f"webrtc-{a.pacing}"
     if not a.abr and not a.session:
         ap.error("--abr or --session is required")
     if a.mode == "wt" and (a.session or a.abr != "throughput"):
@@ -214,10 +248,73 @@ def main():
               f"profiles {list(run['profiles'].values())}", flush=True)
         return bool(drawn)
 
+    def save_yuv(_source, i, w, h, b64):
+        with open(os.path.join(a.out, "frames", f"{i:06d}.yuv"), "wb") as fh:
+            fh.write(base64.b64decode(b64))
+
+    def finish_webrtc(res):
+        """frames.ndjson, the webrtc_*.ndjson files, receiver_stats.ndjson and
+        run.json of a --mode webrtc run."""
+        run, out = runs[0], a.out
+
+        def rel(t):
+            return None if t is None else round(t - t0_ms, 3)
+
+        def write(name, recs, keys):
+            with open(os.path.join(out, name), "w") as fh:
+                for r in recs:
+                    fh.write(json.dumps(dict(r, **{k: rel(r.get(k)) for k in keys if k in r})) + "\n")
+
+        rtp_to_i = {m["rtp_ts"]: m["i"] for m in res["metas"]}
+        first_shown = {}
+        for s in res["shown"]:
+            first_shown.setdefault(s["rtp"], s)
+        poses = res["poses"]
+        for p, ev in zip(poses, events):
+            p["t_ms"] = ev.get("tMs")
+            p["drawn"] = p.get("dec")
+            s = first_shown.get(p.get("rtp_ts"))
+            if s:
+                p["shown"] = s["presented"]
+                if p.get("recv") is None:
+                    p["recv"] = s["recv"]
+        write("frames.ndjson", poses, ("send", "dec", "drawn", "shown", "recv", "t_push", "t_meta"))
+        for f in res["decoded"]:
+            f.setdefault("i", rtp_to_i.get(f["rtp"]))
+        write("webrtc_frames.ndjson", res["decoded"], ("dec", "recv", "cap"))
+        write("webrtc_warmup.ndjson", res["warm"], ("send", "dec"))
+        for s in res["shown"]:
+            s["i"] = rtp_to_i.get(s["rtp"])
+        write("webrtc_shown.ndjson", res["shown"], ("presented", "expected", "recv"))
+        write("receiver_stats.ndjson", res["rstats"], ("t",))
+
+        got = [p for p in poses if "dec" in p]
+        decoded = res["decoded"]
+        run.update(
+            status="ok" if got else "error",
+            start_ms=rel(res["start"]), end_ms=rel(res["end"]), camera=res["camera"],
+            frames=len(got), failed_frames=len(poses) - len(got), profiles={0: len(got)},
+            webrtc={"pacing": a.pacing, "warmup_mode": a.warmup_mode,
+                    "times": {k: rel(v) for k, v in res["times"].items()},
+                    "warmup_sent": len(res["warm"]),
+                    "warmup_decoded": sum("dec" in w for w in res["warm"]),
+                    "frames_read": len(decoded),
+                    "frames_without_message": sum(f["i"] is None for f in decoded),
+                    "formats": sorted({f["fmt"] for f in decoded if f.get("fmt")}),
+                    "messages": len(res["metas"]), "presented": len(res["shown"]),
+                    "viewpoints_presented": sum("shown" in p for p in poses),
+                    "timeouts": sum(p.get("error") == "timeout" for p in poses)},
+            page_errors=errors[-20:])
+        save(run, out)
+        print(f"client: webrtc {a.pacing} {len(got)}/{len(poses)} viewpoints decoded in "
+              f"{(res['end'] - res['start']) / 1e3:.1f} s, {len(decoded)} frames read, "
+              f"{run['webrtc']['warmup_decoded']}/{len(res['warm'])} warm-up", flush=True)
+        return len(got) == len(poses)
+
     errors, done = [], 0
     try:
         with sync_playwright() as pw:
-            args = chromium_args(origin)
+            args = webrtc_chromium_args() if a.mode == "webrtc" else chromium_args(origin)
             browser = pw.chromium.launch(headless=True, args=args)
             page = browser.new_context(ignore_https_errors=True).new_page()
             page.on("pageerror", lambda e: errors.append(str(e)))
@@ -226,6 +323,25 @@ def main():
 
             t0 = a.t0 or time.time()
             t0_ms = t0 * 1e3
+            if a.mode == "webrtc":
+                # The page's first packet is its sign-in to the signaling server.
+                page.expose_binding("tigasSaveYuv", save_yuv)
+                page.goto("about:blank")
+                w, h = map(int, a.resolution.split("x"))
+                camera = {"fx": 1300.0, "fy": 800.0, "cx": w / 2, "cy": h / 2, "width": w, "height": h}
+                runs[0].update(chromium=browser.version, chromium_args=args, t0=t0,
+                               loaded_ms=(time.time() - t0) * 1e3)
+                page.add_script_tag(path=os.path.join(REPO, "exp", "runner_webrtc.js"))
+                res = page.evaluate("cfg => window.tigasRunWebRTC(cfg)", {
+                    "signaling": f"http://{a.server}:{a.signaling_port}", "events": events,
+                    "modelId": a.scene, "camera": camera, "startAtMs": (t0 + a.warmup) * 1e3,
+                    "pacing": a.pacing, "warmup": a.warmup_mode, "closedTimeoutMs": a.closed_timeout_ms,
+                    "tailMs": a.tail_ms, "saveEvery": a.save_every, "display": not a.no_display,
+                    "connectTimeoutMs": a.warmup * 1e3, "quiet": not a.verbose_console})
+                ok = finish_webrtc(res)
+                done = 1
+                browser.close()
+                sys.exit(0 if ok else 1)
             wt = a.mode == "wt"
             page.goto(f"https://{origin}/{'player-wt' if wt else 'player'}?modelId={a.scene}", timeout=30000)
             loaded_ms = (time.time() - t0) * 1e3

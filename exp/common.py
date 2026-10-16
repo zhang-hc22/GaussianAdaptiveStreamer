@@ -39,6 +39,19 @@ def chromium_args(origin, cert_path=CERT):
     ]
 
 
+def webrtc_chromium_args():
+    """Flags of client.py --mode webrtc: ICE candidates carry the real
+    address instead of an mDNS name tigas_sender cannot resolve; the blank
+    page may fetch the signaling server on a private address (Local Network
+    Access would block it); plus the two timer flags of chromium_args."""
+    return [
+        "--disable-features=WebRtcHideLocalIpsWithMdns,LocalNetworkAccessChecks",
+        "--autoplay-policy=no-user-gesture-required",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+    ]
+
+
 def git_commit(path=REPO):
     def git(*a):
         return subprocess.run(["git", "-C", path, *a], capture_output=True, text=True).stdout.strip()
