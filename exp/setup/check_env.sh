@@ -204,15 +204,25 @@ if [[ ${CHECK_WEBRTC:-1} == 1 ]]; then
             fail "webrtc-$b" "missing libraries: $missing"
         fi
     done
-    if [[ -x $WEBRTC_BIN/tigas_sender ]] && "$WEBRTC_BIN/tigas_sender" --helpon=main 2>&1 | grep -q render_socket; then
-        pass webrtc-sender "$WEBRTC_BIN/tigas_sender runs; $(head -1 "$WEBRTC_BIN/BUILD_INFO" 2>/dev/null || echo 'no BUILD_INFO')"
-    elif [[ -x $WEBRTC_BIN/tigas_sender ]]; then
-        fail webrtc-sender "$WEBRTC_BIN/tigas_sender --helpon=main: $("$WEBRTC_BIN/tigas_sender" --helpon=main 2>&1 | tail -1)"
+    # the output goes to a variable first: with pipefail, grep -q closing the
+    # pipe early would fail the check
+    if [[ -x $WEBRTC_BIN/tigas_sender ]]; then
+        out=$("$WEBRTC_BIN/tigas_sender" --helpon=main 2>&1)
+        if [[ $out == *render_socket* ]]; then
+            pass webrtc-sender "$WEBRTC_BIN/tigas_sender runs; $(head -1 "$WEBRTC_BIN/BUILD_INFO" 2>/dev/null || echo 'no BUILD_INFO')"
+        else
+            fail webrtc-sender "$WEBRTC_BIN/tigas_sender --helpon=main: $(tail -1 <<<"$out")"
+        fi
     fi
-    if [[ -x $WEBRTC_BIN/peerconnection_server ]] && "$WEBRTC_BIN/peerconnection_server" --help 2>&1 | grep -q port; then
-        pass webrtc-signaling "$WEBRTC_BIN/peerconnection_server runs"
+    if [[ -x $WEBRTC_BIN/peerconnection_server ]]; then
+        out=$("$WEBRTC_BIN/peerconnection_server" --help 2>&1)
+        if [[ $out == *port* ]]; then
+            pass webrtc-signaling "$WEBRTC_BIN/peerconnection_server runs"
+        else
+            fail webrtc-signaling "$WEBRTC_BIN/peerconnection_server --help: $(tail -1 <<<"$out")"
+        fi
     fi
-    if ss -tln | grep -q ':8888 '; then
+    if [[ $(ss -tln) == *":8888 "* ]]; then
         fail webrtc-port "TCP 8888 (signaling) already in use"
     else
         pass webrtc-port "TCP 8888 free"
