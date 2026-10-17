@@ -156,7 +156,7 @@ def update_runs(out, key, value):
     return run
 
 
-def annotate(out, trace, rtt_ms):
+def annotate(out, trace, rtt_ms, queue_packets):
     """Adds what rattan.log says to run.json."""
     path = os.path.join(out, "run.json")
     if not os.path.exists(path):
@@ -170,6 +170,7 @@ def annotate(out, trace, rtt_ms):
         "version": " ".join(v.strip() for v in version if v.strip()),
         "trace": os.path.abspath(trace) if trace else None,
         "rtt_ms": rtt_ms,
+        "queue_packets": queue_packets if trace else None,
         "trace_start_ms": (start[0] - run["t0"]) * 1e3 if start and "t0" in run else None,
         "first_packet_from": re.search(r'rx_id="(\w+)"', first[0]).group(1) if first else None,
         "busy_drops": sum("system is busy" in l for l in lines),
@@ -274,6 +275,7 @@ def main():
     ap.add_argument("--trace", help="rattan trace JSON (make_traces.py); none: delay only")
     ap.add_argument("--tc-rates", help="--shaper tc-lo: rates of make_traces.py --tc-rates")
     ap.add_argument("--rtt", type=float, default=20, help="ms")
+    ap.add_argument("--queue-packets", type=int, default=1000, help="droptail limit of the downlink queue")
     ap.add_argument("--timeout", type=float, default=900, help="s")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
@@ -285,7 +287,7 @@ def main():
         raise SystemExit("--shaper none is for --transport webrtc")
 
     os.makedirs(a.out, exist_ok=True)
-    cmd = rattan_cmd(a.trace, a.rtt) + [
+    cmd = rattan_cmd(a.trace, a.rtt, a.queue_packets) + [
         "--", sys.executable, os.path.join(REPO, "exp", "client.py"), "--out", os.path.abspath(a.out),
         *client_args]
     env = dict(os.environ, RUST_LOG="info,rattan_core::core=debug")
@@ -301,7 +303,7 @@ def main():
         except Interrupted as e:
             stop(proc)
             rc = f"interrupted by {e}"
-    run = annotate(a.out, a.trace, a.rtt)
+    run = annotate(a.out, a.trace, a.rtt, a.queue_packets)
     report(a, rc, run, "rattan.log", "rattan")
 
 
@@ -517,7 +519,7 @@ def main_webrtc(a, client_args):
         client = [sys.executable, os.path.join(REPO, "exp", "client.py"), "--out", out,
                   "--signaling-port", str(a.signaling_port), *client_args]
         if shaped:
-            cmd = rattan_cmd(a.trace, a.rtt) + ["--", *client]
+            cmd = rattan_cmd(a.trace, a.rtt, a.queue_packets) + ["--", *client]
             env = dict(os.environ, RUST_LOG="info,rattan_core::core=debug")
         else:
             cmd, env = client + ["--server", "127.0.0.1"], dict(os.environ)
@@ -546,7 +548,7 @@ def main_webrtc(a, client_args):
         t0 = json.load(open(os.path.join(out, "run.json"))).get("t0")
     except (OSError, ValueError):
         t0 = None
-    run = annotate(out, a.trace, a.rtt) if shaped else None
+    run = annotate(out, a.trace, a.rtt, a.queue_packets) if shaped else None
     run = annotate_sender(out, t0, sender_rc, a.webrtc_bin, a.render_log, t_start, t_end) or run
     if isinstance(rc, int) and rc == 0 and sender_rc != 0 and run and run["status"] == "ok":
         rc = f"tigas_sender exit {sender_rc}"
