@@ -33,6 +33,15 @@ A table with mode = "wt" plays through /player-wt, the WebTransport push
 mode (client.py --mode wt, abrs = ["throughput"], event_ms = 40). The
 server keeps rendering for a WebTransport session that was not closed
 (gs_app.TimedSend), so it is restarted before every such run.
+A table with transport = "webrtc" plays over WebRTC instead
+(run_one.py --transport webrtc, client.py --mode webrtc):
+pacing = "tms" or "closed" takes the place of abrs (the run
+directory's ABR level is webrtc-<pacing>), warmup_mode = "reverse"
+(default) or "pose0", and warmup_rate = "first" sets the warm-up segment of
+the trace to the Ghent trace's value at its second 0 (trace file
+<trace>_wfirst.json; the default is 50 Mbit/s). Such runs need no QUIC
+server: one render worker (webrtc/render_worker.py) serves all of them, and
+each run starts its own signaling server and tigas_sender.
 
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
 
@@ -49,14 +58,16 @@ import shutil
 import signal
 import subprocess
 import sys
+import socket
 import time
 import tomllib
 
 from common import REPO, find_runs, load_events, run_rel, trace_name, traj_name
-from make_traces import build, tc_rates
+from make_traces import build, ghent_bps, tc_rates
 
 EXP = os.path.join(REPO, "exp")
 PORT = 4433
+SIGNALING_PORT = 8888
 LOG = None
 
 
@@ -88,18 +99,26 @@ def plan_runs(cfg, only):
                  for rtt in t["rtt_ms"]]
         offsets, shaper = t.get("offsets_s"), t.get("shaper", "rattan")
         reps = len(offsets) if offsets else t["reps"]
+        webrtc = t.get("transport", "quic") == "webrtc"
+        if webrtc and (offsets or t.get("sessions") or shaper != "rattan"):
+            raise SystemExit(f"[{name}]: transport webrtc takes no offsets_s, sessions or shaper")
+        abrs = [f"webrtc-{t['pacing']}"] if webrtc else t["abrs"]
+        first = t.get("warmup_rate") == "first"
         if t.get("sessions"):
             units = [[(c, abr, rep, sname) for abr in order for rep in range(1, reps + 1)]
                      for sname, order in t["sessions"].items() for c in conds]
         else:
-            units = [[(c, abr, rep, None)] for rep in range(1, reps + 1) for c in conds for abr in t["abrs"]]
+            units = [[(c, abr, rep, None)] for rep in range(1, reps + 1) for c in conds for abr in abrs]
         for unit in units:
             for k, ((scene, traj, trace, scale, rtt), abr, rep, sname) in enumerate(unit, 1):
                 n = lengths.setdefault(traj, len(load_events(traj)))
                 off = offsets[rep - 1] if offsets else 0
                 label = (trace_name(trace, scale) + ("_phi" if offsets else "")
                          + (f"_{sname}" if sname else "") + ("_tclo" if shaper == "tc-lo" else ""))
-                r = {"exp": name, "mode": t.get("mode", "player"), "event_ms": t.get("event_ms", 40),
+                r = {"exp": name, "mode": "webrtc" if webrtc else t.get("mode", "player"),
+                     "event_ms": t.get("event_ms", 40),
+                     "pacing": t.get("pacing"), "warmup_mode": t.get("warmup_mode", "reverse"),
+                     "warmup_rate": "first" if first else None,
                      "scene": scene, "trajectory": traj, "trace": trace,
                      "scale": scale, "trace_name": trace_name(trace, scale) + (f"_phi{off}" if off else ""),
                      "label": label, "offset_s": off, "shaper": shaper, "rtt_ms": rtt,
@@ -107,6 +126,8 @@ def plan_runs(cfg, only):
                      "session": sname, "session_index": k if sname else None,
                      "viewpoints": min(n, t.get("max_viewpoints") or n),
                      "max_viewpoints": t.get("max_viewpoints")}
+                # the file of the trace; its warm-up rate is not in the run path
+                r["trace_file"] = r["trace_name"] + ("_wfirst" if first else "")
                 r["rel"] = run_rel(scene, traj, label, rtt, abr, rep)
                 r["unit"] = (os.path.join("sessions", scene, traj_name(traj), label, f"rtt{rtt:g}")
                              if sname else r["rel"])
@@ -130,7 +151,8 @@ def is_done(run_dir, viewpoints):
     except (OSError, ValueError):
         return False
     return (run.get("status") == "ok" and ("rattan" in run or "tc" in run)
-            and run.get("viewpoints") == viewpoints)
+            and run.get("viewpoints") == viewpoints
+            and (run["args"].get("mode") != "webrtc" or run.get("sender", {}).get("rc") == 0))
 
 
 # ---- steps 1 and 2
@@ -138,8 +160,9 @@ def is_done(run_dir, viewpoints):
 def check_env(cfg, runs):
     log("check: exp/setup/check_env.sh")
     scenes = sorted({r["scene"] for r in runs})
+    webrtc = any(r["mode"] == "webrtc" for r in runs)
     p = subprocess.run(["bash", "exp/setup/check_env.sh"], cwd=REPO, capture_output=True, text=True,
-                       env=dict(os.environ, SCENE=scenes[0]))
+                       env=dict(os.environ, SCENE=scenes[0], CHECK_WEBRTC="1" if webrtc else "0"))
     for line in p.stdout.splitlines():
         if line.startswith(("FAIL", "WARN")):
             log("  " + line)
@@ -147,8 +170,10 @@ def check_env(cfg, runs):
     for scene in scenes:
         if not glob.glob(os.path.join(REPO, "static", "models", scene, "*.ply")):
             problems.append(f"no model for scene {scene} (static/models/{scene}/*.ply)")
-    if udp_port_used(PORT):
+    if any(r["mode"] != "webrtc" for r in runs) and udp_port_used(PORT):
         problems.append(f"UDP port {PORT} in use; is another server running?")
+    if webrtc and tcp_port_used(SIGNALING_PORT):
+        problems.append(f"TCP port {SIGNALING_PORT} in use; is a signaling server running?")
     if problems:
         raise SystemExit("check failed: " + "; ".join(problems))
     log("check: passed")
@@ -160,18 +185,21 @@ def write_traces(cfg, out, runs):
     os.makedirs(os.path.join(out, "traces"), exist_ok=True)
     s, paths = cfg["server"], {}
     for r in runs:
-        key = (r["trace_name"], r["shaper"])
+        key = (r["trace_file"], r["shaper"])
         if not r["trace"] or key in paths:
             continue
         if r["shaper"] == "tc-lo":
-            path = os.path.join(out, "traces", r["trace_name"] + ".rates")
+            path = os.path.join(out, "traces", r["trace_file"] + ".rates")
             text = tc_rates(r["trace"], r["scale"], r["offset_s"])
         else:
-            path = os.path.join(out, "traces", r["trace_name"] + ".json")
-            text = json.dumps(build(r["trace"], r["scale"], s["warmup_s"], total=s.get("trace_total_s", 3600),
-                                    offset=r["offset_s"]), separators=(",", ":"))
+            path = os.path.join(out, "traces", r["trace_file"] + ".json")
+            warmup_bps = (ghent_bps(r["trace"], r["scale"], r["offset_s"])[0] if r["warmup_rate"] == "first"
+                          else 50_000_000)
+            text = json.dumps(build(r["trace"], r["scale"], s["warmup_s"], warmup_bps=warmup_bps,
+                                    total=s.get("trace_total_s", 3600), offset=r["offset_s"]),
+                              separators=(",", ":"))
         if os.path.exists(path) and open(path).read() != text:
-            used = [x["rel"] for x in runs if (x["trace_name"], x["shaper"]) == key
+            used = [x["rel"] for x in runs if (x["trace_file"], x["shaper"]) == key
                     and is_done(os.path.join(out, "runs", x["rel"]), x["viewpoints"])]
             if used:
                 raise SystemExit(f"{path} would change, but {len(used)} finished runs used it; "
@@ -193,8 +221,18 @@ def udp_port_used(port):
     return False
 
 
+def tcp_port_used(port):
+    for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+        for line in open(f).read().splitlines()[1:]:
+            p = line.split()
+            if int(p[1].split(":")[1], 16) == port and p[3] == "0A":
+                return True
+    return False
+
+
 def experiment_procs():
-    """PIDs of this user's rattan, client.py and Playwright processes."""
+    """PIDs of this user's rattan, client.py, Playwright, tigas_sender and
+    peerconnection_server processes."""
     uid, me, out = os.getuid(), os.getpid(), set()
     for d in os.listdir("/proc"):
         if not d.isdigit() or int(d) == me:
@@ -205,7 +243,8 @@ def experiment_procs():
             cmd = open(f"/proc/{d}/cmdline", "rb").read().decode(errors="replace").split("\0")
         except OSError:
             continue
-        if (os.path.basename(cmd[0]) == "rattan" or "ms-playwright" in cmd[0]
+        if (os.path.basename(cmd[0]) in ("rattan", "tigas_sender", "peerconnection_server")
+                or "ms-playwright" in cmd[0]
                 or "playwright/driver" in cmd[0]
                 or any(a.endswith(("exp/client.py", "exp/tc_lo_loop.sh")) for a in cmd)):
             out.add(int(d))
@@ -280,6 +319,56 @@ class Server:
         log("server: stopped")
 
 
+class Worker:
+    """webrtc/render_worker.py, one for the whole matrix like the server."""
+
+    def __init__(self, out):
+        self.out, self.proc = out, None
+        self.socket = os.path.join(out, "render.sock")
+        if len(self.socket) > 100:   # sun_path holds 108 bytes
+            self.socket = f"/tmp/tigas_render_{os.getuid()}.sock"
+        self.log = os.path.join(out, "render_worker.ndjson")
+
+    def ready(self):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+                c.connect(self.socket)
+            return True
+        except OSError:
+            return False
+
+    def start(self, scene):
+        log(f"render worker: starting ({scene})")
+        if os.path.exists(self.socket):
+            os.unlink(self.socket)
+        logf = open(os.path.join(self.out, "render_worker.log"), "a")
+        self.proc = subprocess.Popen(
+            [sys.executable, "webrtc/render_worker.py", "--socket", self.socket, "--scene", scene,
+             "--log", self.log], cwd=REPO, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+        for _ in range(3000):   # the first rasterization may compile kernels
+            if os.path.exists(self.socket) and self.ready():
+                log("render worker: listening")
+                return
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        raise SystemExit("render worker did not start; see render_worker.log")
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        if not self.alive():
+            return
+        os.killpg(self.proc.pid, signal.SIGTERM)
+        try:
+            self.proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.wait()
+        log("render worker: stopped")
+
+
 CHILD = None   # the subprocess currently running, stopped on an interruption
 
 
@@ -313,7 +402,7 @@ def stop_child():
 def warm_up(out, runs, resolution, warmup_s=30):
     """One short local run per scene: the server loads the model and
     compiles its kernels before the first measured run."""
-    for scene in sorted({r["scene"] for r in runs}):
+    for scene in sorted({r["scene"] for r in runs if r["mode"] != "webrtc"}):
         traj = next(r["trajectory"] for r in runs if r["scene"] == scene)
         d = os.path.join(out, "warmup", scene)
         shutil.rmtree(d, ignore_errors=True)
@@ -326,9 +415,28 @@ def warm_up(out, runs, resolution, warmup_s=30):
         log(f"warm-up: {scene} first frame after {first / 1e3:.1f} s")
 
 
+def warm_up_webrtc(out, runs, resolution, worker):
+    """One short local WebRTC run per scene, without rattan (run_one.py
+    --shaper none): checks the sender, the worker and the page before the
+    first measured run."""
+    for scene in sorted({r["scene"] for r in runs if r["mode"] == "webrtc"}):
+        traj = next(r["trajectory"] for r in runs if r["scene"] == scene)
+        d = os.path.join(out, "warmup", "webrtc", scene)
+        shutil.rmtree(d, ignore_errors=True)
+        rc, text = call([sys.executable, "exp/run_one.py", "--transport", "webrtc", "--shaper", "none",
+                         "--render-socket", worker.socket, "--timeout", "120", "--out", d, "--",
+                         "--mode", "webrtc", "--scene", scene, "--trajectory", traj, "--max-frames", "36",
+                         "--resolution", resolution, "--warmup", "5"], stop_group=False)
+        if rc != 0:
+            raise SystemExit(f"WebRTC warm-up of {scene} failed: {last_line(rc, text)}")
+        run = json.load(open(os.path.join(d, "run.json")))
+        log(f"warm-up: {scene} over WebRTC, data channel open after "
+            f"{run['webrtc']['times'].get('dc_open', float('nan')) / 1e3:.2f} s, {run['frames']} frames")
+
+
 def meta(r):
-    return {k: r[k] for k in ("exp", "mode", "label", "trace_name", "offset_s", "shaper", "session",
-                              "session_index")}
+    return {k: r[k] for k in ("exp", "mode", "label", "trace_name", "trace_file", "offset_s", "shaper",
+                              "session", "session_index", "pacing", "warmup_mode", "warmup_rate")}
 
 
 def shaper_args(r, trace_path):
@@ -342,15 +450,19 @@ def client_args(s, r):
            "--warmup", f"{s['warmup_s']:g}", "--resolution", s["resolution"]]
     if r["mode"] == "wt":
         out += ["--mode", "wt", "--event-ms", f"{r['event_ms']:g}"]
+    if r["mode"] == "webrtc":
+        out += ["--mode", "webrtc", "--pacing", r["pacing"], "--warmup-mode", r["warmup_mode"]]
     return out + (["--max-frames", str(r["max_viewpoints"])] if r["max_viewpoints"] else [])
 
 
-def run_one(cfg, out, r, trace_path):
+def run_one(cfg, out, r, trace_path, worker):
     s = cfg["server"]
+    webrtc = (["--transport", "webrtc", "--render-socket", worker.socket, "--render-log", worker.log]
+              if r["mode"] == "webrtc" else [])
     cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}", *shaper_args(r, trace_path),
-           "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"]),
-           "--", *client_args(s, r), "--abr", r["abr"], "--seed", str(r["seed"]),
-           "--meta", json.dumps(meta(r))]
+           *webrtc, "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"]),
+           "--", *client_args(s, r), *([] if webrtc else ["--abr", r["abr"]]),
+           "--seed", str(r["seed"]), "--meta", json.dumps(meta(r))]
     return last_line(*call(cmd, stop_group=False))
 
 
@@ -394,11 +506,17 @@ def run_matrix(cfg, out, runs, pending, args):
     if tc_lo:
         clear_lo("before the runs")
     units = units_of(pending)
-    server = Server(out)
+    quic = any(r["mode"] != "webrtc" for r in pending)
+    webrtc = [r for r in pending if r["mode"] == "webrtc"]
+    server, worker = Server(out), Worker(out)
     failed, used = [], False
     try:
-        server.start()
-        warm_up(out, pending, cfg["server"]["resolution"])
+        if quic:
+            server.start()
+            warm_up(out, pending, cfg["server"]["resolution"])
+        if webrtc:
+            worker.start(webrtc[0]["scene"])
+            warm_up_webrtc(out, pending, cfg["server"]["resolution"], worker)
         for k, unit in enumerate(units, 1):
             r = unit[0]
             name = (f"session {k}/{len(units)} {r['unit']} ({len(unit)} runs)" if r["session"]
@@ -406,7 +524,12 @@ def run_matrix(cfg, out, runs, pending, args):
             dirs = [os.path.join(out, "runs", x["rel"]) for x in unit] + ([os.path.join(out, r["unit"])]
                                                                           if r["session"] else [])
             for attempt in (1, 2):
-                if r["mode"] == "wt" and used:
+                if r["mode"] == "webrtc":
+                    if not worker.alive():
+                        log("render worker: died; restarting")
+                        worker.start(r["scene"])
+                        warm_up_webrtc(out, pending, cfg["server"]["resolution"], worker)
+                elif r["mode"] == "wt" and used:
                     server.stop()
                     server.start()
                     warm_up(out, pending, cfg["server"]["resolution"])
@@ -419,8 +542,9 @@ def run_matrix(cfg, out, runs, pending, args):
                     shutil.rmtree(d, ignore_errors=True)
                 before, ns = experiment_procs(), netns_count()
                 t = time.time()
-                path = traces.get((r["trace_name"], r["shaper"]))
-                status = run_session(cfg, out, unit, path) if r["session"] else run_one(cfg, out, r, path)
+                path = traces.get((r["trace_file"], r["shaper"]))
+                status = (run_session(cfg, out, unit, path) if r["session"]
+                          else run_one(cfg, out, r, path, worker))
                 left = kill_new(before)
                 done = [is_done(os.path.join(out, "runs", x["rel"]), x["viewpoints"]) for x in unit]
                 ok = all(done)
@@ -448,6 +572,7 @@ def run_matrix(cfg, out, runs, pending, args):
     finally:
         stop_child()
         server.stop()
+        worker.stop()
         if tc_lo:
             clear_lo("after the runs")
     return failed

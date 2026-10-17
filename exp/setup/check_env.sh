@@ -194,6 +194,31 @@ with sync_playwright() as p:
     fi
 fi
 
+# ---- WebRTC binaries (run_all.py sets CHECK_WEBRTC=1 for transport = "webrtc")
+WEBRTC_BIN=${WEBRTC_BIN:-webrtc/bin}
+if [[ ${CHECK_WEBRTC:-1} == 1 ]]; then
+    for b in tigas_sender peerconnection_server; do
+        if [[ ! -x $WEBRTC_BIN/$b ]]; then
+            fail "webrtc-$b" "$WEBRTC_BIN/$b missing (build it from sparkrtc)"
+        elif missing=$(ldd "$WEBRTC_BIN/$b" 2>&1 | grep 'not found' | awk '{print $1}' | tr '\n' ' ') && [[ -n $missing ]]; then
+            fail "webrtc-$b" "missing libraries: $missing"
+        fi
+    done
+    if [[ -x $WEBRTC_BIN/tigas_sender ]] && "$WEBRTC_BIN/tigas_sender" --helpon=main 2>&1 | grep -q render_socket; then
+        pass webrtc-sender "$WEBRTC_BIN/tigas_sender runs; $(head -1 "$WEBRTC_BIN/BUILD_INFO" 2>/dev/null || echo 'no BUILD_INFO')"
+    elif [[ -x $WEBRTC_BIN/tigas_sender ]]; then
+        fail webrtc-sender "$WEBRTC_BIN/tigas_sender --helpon=main: $("$WEBRTC_BIN/tigas_sender" --helpon=main 2>&1 | tail -1)"
+    fi
+    if [[ -x $WEBRTC_BIN/peerconnection_server ]] && "$WEBRTC_BIN/peerconnection_server" --help 2>&1 | grep -q port; then
+        pass webrtc-signaling "$WEBRTC_BIN/peerconnection_server runs"
+    fi
+    if ss -tln | grep -q ':8888 '; then
+        fail webrtc-port "TCP 8888 (signaling) already in use"
+    else
+        pass webrtc-port "TCP 8888 free"
+    fi
+fi
+
 # ---- scene model and port
 ply=$(ls static/models/"$SCENE"/*.ply 2>/dev/null | head -1)
 if [[ -n $ply ]]; then

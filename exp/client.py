@@ -51,7 +51,10 @@ handed to the encoder, sender clock = page clock on one host); "error":
 "no frame" or "timeout" if none was read. webrtc_frames.ndjson has every
 frame read, webrtc_warmup.ndjson the warm-up messages, webrtc_shown.ndjson
 the presented frames, receiver_stats.ndjson getStats every 100 ms, and
-frames/<i>.yuv the I420 of every 12th viewpoint.
+frames/<i>.yuv the I420 of every 12th viewpoint. Such a viewpoint that got
+no frame has frames/<i>_standin.yuv instead, the frame on screen while its
+frame was due (exp/runner_webrtc.js), and standin_i in frames.ndjson: the
+viewpoint that frame belongs to (negative: a warm-up frame).
 """
 import argparse
 import base64
@@ -248,8 +251,9 @@ def main():
               f"profiles {list(run['profiles'].values())}", flush=True)
         return bool(drawn)
 
-    def save_yuv(_source, i, w, h, b64):
-        with open(os.path.join(a.out, "frames", f"{i:06d}.yuv"), "wb") as fh:
+    def save_yuv(_source, i, w, h, b64, kind="frame"):
+        name = f"{i:06d}.yuv" if kind == "frame" else f"{i:06d}_standin.yuv"
+        with open(os.path.join(a.out, "frames", name), "wb") as fh:
             fh.write(base64.b64decode(b64))
 
     def finish_webrtc(res):
@@ -270,6 +274,7 @@ def main():
         for s in res["shown"]:
             first_shown.setdefault(s["rtp"], s)
         poses = res["poses"]
+        standin = {x["i"]: x["from_rtp"] for x in res["standins"]}
         for p, ev in zip(poses, events):
             p["t_ms"] = ev.get("tMs")
             p["drawn"] = p.get("dec")
@@ -278,6 +283,8 @@ def main():
                 p["shown"] = s["presented"]
                 if p.get("recv") is None:
                     p["recv"] = s["recv"]
+            if p["i"] in standin:
+                p["standin_i"] = rtp_to_i.get(standin[p["i"]])
         write("frames.ndjson", poses, ("send", "dec", "drawn", "shown", "recv", "t_push", "t_meta"))
         for f in res["decoded"]:
             f.setdefault("i", rtp_to_i.get(f["rtp"]))
@@ -300,6 +307,8 @@ def main():
                     "warmup_decoded": sum("dec" in w for w in res["warm"]),
                     "frames_read": len(decoded),
                     "frames_without_message": sum(f["i"] is None for f in decoded),
+                    "frames_before_message": res["pendingAtRead"],
+                    "standins": len(standin),
                     "formats": sorted({f["fmt"] for f in decoded if f.get("fmt")}),
                     "messages": len(res["metas"]), "presented": len(res["shown"]),
                     "viewpoints_presented": sum("shown" in p for p in poses),

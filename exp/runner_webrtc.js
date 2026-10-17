@@ -19,7 +19,11 @@
 // viewpoint interval.
 //
 // Every saveEvery-th viewpoint's first frame goes to Python as I420 through
-// the tigasSaveYuv binding. All times are epoch ms.
+// the tigasSaveYuv binding. Such a viewpoint that gets no frame (lost frames,
+// a closed-pacing timeout, the end of the run) gets a stand-in instead: the
+// frame read before the first frame of a later viewpoint, i.e. the one on
+// screen while its frame was due. Frames decode in RTP order, so once a later
+// viewpoint's frame is read, its own will not come. All times are epoch ms.
 (() => {
     const now = () => performance.timeOrigin + performance.now();
     const sleepUntil = t => new Promise(r => setTimeout(r, Math.max(0, t - now())));
@@ -94,6 +98,10 @@
         const shown = [];          // requestVideoFrameCallback records
         const rstats = [];         // getStats every statsMs
         const saves = [];
+        const standins = [];       // {i, from_rtp}: sampled viewpoints without a frame
+        let pendingAtRead = 0;     // frames read before their message
+        let prev = null;           // the frame read last: {frame (a clone), rtp}
+        let lastI = -1;            // the highest viewpoint whose frame was read
         const metaByRtp = new Map();
         const pendingByRtp = new Map();  // frames read before their message
         const waiters = new Map();       // closed pacing: i -> resolve
@@ -145,16 +153,44 @@
         pc.onconnectionstatechange = () => { times[`pc_${pc.connectionState}`] ??= now(); };
 
         // --- frames ---------------------------------------------------------
-        function saveYuv(i, w, h, data) {
+        function saveYuv(i, w, h, data, kind = 'frame') {
             return new Promise((resolve, reject) => {
                 const fr = new FileReader();
                 fr.onload = () => {
                     const b64 = fr.result.slice(fr.result.indexOf(',') + 1);
-                    resolve(window.tigasSaveYuv(i, w, h, b64));
+                    resolve(window.tigasSaveYuv(i, w, h, b64, kind));
                 };
                 fr.onerror = () => reject(fr.error);
                 fr.readAsDataURL(new Blob([data]));
             });
+        }
+
+        // Sampled viewpoints after lastI and before k that have no frame.
+        function gap(k) {
+            const out = [];
+            for (let s = Math.floor(lastI / saveEvery + 1) * saveEvery; s < Math.min(k, poses.length);
+                 s += saveEvery) {
+                if (poses[s] && poses[s].dec === undefined) out.push(s);
+            }
+            return out;
+        }
+
+        // Stand-ins for the gap before viewpoint k; before = {rtp, w, h, data}
+        // of the frame read just before k's.
+        function fillGap(k, before) {
+            const ss = gap(k);
+            if (ss.length && before && before.data) {
+                for (const s of ss) {
+                    standins.push({ i: s, from_rtp: before.rtp });
+                    saves.push(saveYuv(s, before.w, before.h, before.data, 'standin'));
+                }
+            }
+            lastI = Math.max(lastI, k);
+        }
+
+        async function prevCopy() {
+            return prev ? { rtp: prev.rtp, w: prev.frame.codedWidth, h: prev.frame.codedHeight,
+                            data: await copyI420(prev.frame) } : null;
         }
 
         // The first frame of viewpoint i (or of a warm-up message).
@@ -184,6 +220,7 @@
             const pend = pendingByRtp.get(m.rtp_ts);
             if (pend) {
                 pendingByRtp.delete(m.rtp_ts);
+                if (m.i >= 0) fillGap(m.i, pend.before);
                 onFrameFor(m, pend.rec, pend.data);
             }
         };
@@ -217,14 +254,24 @@
                 try {
                     const meta = metaByRtp.get(rec.rtp);
                     if (meta) {
+                        if (meta.i >= 0 && gap(meta.i).length) fillGap(meta.i, await prevCopy());
+                        else if (meta.i >= 0) lastI = Math.max(lastI, meta.i);
                         const save = meta.i >= 0 && meta.i % saveEvery === 0 && poses[meta.i]
                             && poses[meta.i].dec === undefined;
                         onFrameFor(meta, rec, save ? await copyI420(frame) : null);
                     } else {
+                        // Its viewpoint is not known yet; keep the previous frame
+                        // too in case it closes a gap.
+                        pendingAtRead++;
                         if (pendingByRtp.size >= 8) pendingByRtp.delete(pendingByRtp.keys().next().value);
-                        pendingByRtp.set(rec.rtp, { rec, data: await copyI420(frame) });
+                        pendingByRtp.set(rec.rtp, {
+                            rec, data: await copyI420(frame),
+                            before: gap(Infinity).length ? await prevCopy() : null,
+                        });
                     }
                 } finally {
+                    if (prev) prev.frame.close();
+                    prev = { frame: frame.clone(), rtp: rec.rtp };
                     frame.close();
                 }
             }
@@ -347,7 +394,11 @@
         pc.close();
         await sig.signOut();
         await Promise.race([readerDone, new Promise(r => setTimeout(r, 500))]);
+        // sampled viewpoints after the last frame read
+        if (gap(Infinity).length) fillGap(Infinity, await prevCopy());
+        if (prev) prev.frame.close();
         await Promise.all(saves);
-        return { start, end, camera, times, poses, warm, metas, decoded, shown, rstats };
+        return { start, end, camera, times, poses, warm, metas, decoded, shown, rstats, standins,
+                 pendingAtRead };
     };
 })();
