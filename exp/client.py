@@ -336,10 +336,12 @@ def main():
                 page.expose_binding("tigasSaveYuv", save_yuv)
                 page.goto("about:blank")
                 page.add_script_tag(path=os.path.join(REPO, "exp", "runner_webrtc.js"))
+                page.evaluate("ev => { window.tigasEvents = ev; }", events)
                 # The page's first packet, its sign-in to the signaling server,
-                # starts the rattan trace. t0 is taken once the script is in, so
-                # that packet comes a few ms after t0, as /player's first
-                # request does; before, page setup put it ~130 ms after.
+                # starts the rattan trace. t0 is taken once the script and the
+                # events are in, so that packet comes a few ms after t0, as
+                # /player's first request does; before, page setup put it
+                # ~130 ms after.
                 loaded_ms = (time.time() - t0) * 1e3
                 t0 = a.t0 or time.time()
                 t0_ms = t0 * 1e3
@@ -347,7 +349,7 @@ def main():
                 camera = {"fx": 1300.0, "fy": 800.0, "cx": w / 2, "cy": h / 2, "width": w, "height": h}
                 runs[0].update(chromium=browser.version, chromium_args=args, t0=t0, loaded_ms=loaded_ms)
                 res = page.evaluate("cfg => window.tigasRunWebRTC(cfg)", {
-                    "signaling": f"http://{a.server}:{a.signaling_port}", "events": events,
+                    "signaling": f"http://{a.server}:{a.signaling_port}",
                     "modelId": a.scene, "camera": camera, "startAtMs": (t0 + a.warmup) * 1e3,
                     "pacing": a.pacing, "warmup": a.warmup_mode, "closedTimeoutMs": a.closed_timeout_ms,
                     "tailMs": a.tail_ms, "saveEvery": a.save_every, "display": not a.no_display,

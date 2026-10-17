@@ -84,10 +84,13 @@
 
     window.tigasRunWebRTC = async (cfg) => {
         const {
-            signaling, events, modelId, camera, startAtMs, pacing = 'tms', warmup = 'reverse',
+            signaling, modelId, camera, startAtMs, pacing = 'tms', warmup = 'reverse',
             closedTimeoutMs = 2000, tailMs = 1000, saveEvery = 12, statsMs = 100,
             display = true, connectTimeoutMs = 8000, quiet = true,
         } = cfg;
+        // client.py hands the events over beforehand (window.tigasEvents):
+        // copying 2167 of them into this call took ~100 ms after t0.
+        const events = cfg.events || window.tigasEvents;
         if (quiet) console.log = console.debug = () => {};
         const N = events.length;
         const times = {};          // connection milestones
