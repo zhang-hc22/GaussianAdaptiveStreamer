@@ -93,7 +93,7 @@
         const events = cfg.events || window.tigasEvents;
         if (quiet) console.log = console.debug = () => {};
         const N = events.length;
-        const times = {};          // connection milestones
+        const times = { enter: now() };  // connection milestones
         const poses = [];          // one record per viewpoint of the run
         const warm = [];           // warm-up messages
         const metas = [];          // the sender's per-frame messages
