@@ -407,6 +407,8 @@ def fig_system_webrtc(frames, runs, path):
     per_run(axes[2], runs, abrs, "bandwidth_mbps", "bandwidth used (Mbit/s)")
     per_run(axes[3], runs, abrs, "target_mbps", "GCC target (Mbit/s)")
     boxes(axes[4], {a: frames[frames["abr"] == a]["qp"].dropna() for a in abrs}, abrs, "QP")
+    for ax in axes:  # "WebRTC" on its own line, so that labels of narrow panels do not overlap
+        ax.set_xticks(range(1, len(abrs) + 1), [LABEL.get(a, a).replace(" ", "\n", 1) for a in abrs])
     handles, labels = axes[1].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=len(PARTS), frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.9))
