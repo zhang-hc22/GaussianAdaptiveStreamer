@@ -18,8 +18,10 @@
 // motion runs into viewpoint 0; "pose0" sends viewpoint 0 at the mean
 // viewpoint interval.
 //
-// Every saveEvery-th viewpoint's first frame goes to Python as I420 through
-// the tigasSaveYuv binding. Such a viewpoint that gets no frame (lost frames,
+// Every saveEvery-th viewpoint's first frame is kept as I420 and goes to
+// Python through the tigasSaveYuv binding once playback is over: passing one
+// takes ~25 ms of the main thread, which held up the next viewpoint's send
+// when done during playback. Such a viewpoint that gets no frame (lost frames,
 // a closed-pacing timeout, the end of the run) gets a stand-in instead: the
 // frame read before the first frame of a later viewpoint, i.e. the one on
 // screen while its frame was due. Frames decode in RTP order, so once a later
@@ -100,7 +102,7 @@
         const decoded = [];        // every frame read from the track
         const shown = [];          // requestVideoFrameCallback records
         const rstats = [];         // getStats every statsMs
-        const saves = [];
+        const saves = [];          // {i, w, h, data, kind}, passed on after playback
         const standins = [];       // {i, from_rtp}: sampled viewpoints without a frame
         let pendingAtRead = 0;     // frames read before their message
         let prev = null;           // the frame read last: {frame (a clone), rtp}
@@ -157,15 +159,19 @@
 
         // --- frames ---------------------------------------------------------
         function saveYuv(i, w, h, data, kind = 'frame') {
-            return new Promise((resolve, reject) => {
-                const fr = new FileReader();
-                fr.onload = () => {
-                    const b64 = fr.result.slice(fr.result.indexOf(',') + 1);
-                    resolve(window.tigasSaveYuv(i, w, h, b64, kind));
-                };
-                fr.onerror = () => reject(fr.error);
-                fr.readAsDataURL(new Blob([data]));
-            });
+            saves.push({ i, w, h, data, kind });
+        }
+
+        async function passSaves() {
+            for (const s of saves.splice(0)) {
+                const b64 = await new Promise((resolve, reject) => {
+                    const fr = new FileReader();
+                    fr.onload = () => resolve(fr.result.slice(fr.result.indexOf(',') + 1));
+                    fr.onerror = () => reject(fr.error);
+                    fr.readAsDataURL(new Blob([s.data]));
+                });
+                await window.tigasSaveYuv(s.i, s.w, s.h, b64, s.kind);
+            }
         }
 
         // Sampled viewpoints after lastI and before k that have no frame.
@@ -185,7 +191,7 @@
             if (ss.length && before && before.data) {
                 for (const s of ss) {
                     standins.push({ i: s, from_rtp: before.rtp });
-                    saves.push(saveYuv(s, before.w, before.h, before.data, 'standin'));
+                    saveYuv(s, before.w, before.h, before.data, 'standin');
                 }
             }
             lastI = Math.max(lastI, k);
@@ -210,7 +216,7 @@
                 dec: rec.dec, rtp_ts: rec.rtp, recv: rec.recv, render_ms: meta.render_ms,
                 t_push: meta.t_push, t_meta: meta.t_meta, frame: rec.n, width: rec.w, height: rec.h,
             });
-            if (meta.i % saveEvery === 0 && data) saves.push(saveYuv(meta.i, rec.w, rec.h, data));
+            if (meta.i % saveEvery === 0 && data) saveYuv(meta.i, rec.w, rec.h, data);
             const wake = waiters.get(meta.i);
             if (wake) { waiters.delete(meta.i); wake(true); }
         }
@@ -400,7 +406,7 @@
         // sampled viewpoints after the last frame read
         if (gap(Infinity).length) fillGap(Infinity, await prevCopy());
         if (prev) prev.frame.close();
-        await Promise.all(saves);
+        await passSaves();
         return { start, end, camera, times, poses, warm, metas, decoded, shown, rstats, standins,
                  pendingAtRead };
     };
