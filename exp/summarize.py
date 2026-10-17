@@ -86,7 +86,8 @@ from make_traces import segments  # noqa: E402
 ABRS = ["simple", "l2a", "lol+"]   # /player; abrs_in() puts others after them
 WEBRTC = ["webrtc-tms", "webrtc-closed"]
 LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+",   # names in the paper
-         "throughput": "Throughput (WT)", "webrtc-tms": "WebRTC tms", "webrtc-closed": "WebRTC closed"}
+         "throughput": "Throughput (WT)", "webrtc-tms": "WebRTC tms", "webrtc-closed": "WebRTC closed",
+         "webrtc-tms-pose0": "WebRTC tms pose0"}  # the last one only in the warm-up checks
 COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3", "throughput": "#e7298a",
          "webrtc-tms": "#66a61e", "webrtc-closed": "#e6ab02"}
 # latency parts of a WebRTC viewpoint: column, label, from, to
@@ -488,7 +489,9 @@ def fig_timeseries_webrtc(steps, run, fr, logs, path):
         t = steps[0] - run["start_ms"] / 1e3
         bw = steps[1] / 1e6
         keep = t <= end
-        ax.step(t[keep], bw[keep], where="post", color="black", lw=0.8, label="trace")
+        # the last rate kept runs to the end of the plot
+        ax.step(np.append(t[keep], end), np.append(bw[keep], bw[keep][-1:]), where="post", color="black",
+                lw=0.8, label="trace")
         t_end = np.append(t[1:], np.inf)
         top += list(bw[(t_end > -1) & (t < end)])
     bins = np.arange(-1, end + 0.5, 0.5)
