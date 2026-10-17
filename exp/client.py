@@ -336,7 +336,9 @@ def main():
                 page.expose_binding("tigasSaveYuv", save_yuv)
                 page.goto("about:blank")
                 page.add_script_tag(path=os.path.join(REPO, "exp", "runner_webrtc.js"))
-                page.evaluate("ev => { window.tigasEvents = ev; }", events)
+                # The first RTCPeerConnection of a page takes ~150 ms on our test host;
+                # a throwaway one here keeps that before t0.
+                page.evaluate("ev => { window.tigasEvents = ev; new RTCPeerConnection().close(); }", events)
                 # The page's first packet, its sign-in to the signaling server,
                 # starts the rattan trace. t0 is taken once the script and the
                 # events are in, so that packet comes a few ms after t0, as
