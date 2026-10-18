@@ -44,6 +44,7 @@ server: one render worker (webrtc/render_worker.py) serves all of them, and
 each run starts its own signaling server and tigas_sender.
 
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
+                        [--only TABLE ...] [--rtt-ms MS ...]
 
 Output in --out; run_all.log there keeps the progress lines of
 every invocation. SIGTERM or Ctrl-C stops the current run cleanly.
@@ -85,9 +86,10 @@ def interrupt(_signum, _frame):
 
 # ---- the run list
 
-def plan_runs(cfg, only):
-    """Every run of the config, in the order they are run. Runs of a session
-    share r["unit"]; any other run is a unit of its own."""
+def plan_runs(cfg, only, rtts=None):
+    """Every run of the config, in the order they are run, only at the RTTs
+    rtts if given. Runs of a session share r["unit"]; any other run is a
+    unit of its own."""
     runs, seen, lengths = [], set(), {}
     for name, t in cfg.items():
         if name == "server" or (only and name not in only):
@@ -96,7 +98,7 @@ def plan_runs(cfg, only):
                  for scene in t["scenes"] for traj in t["trajectories"]
                  for trace, scale in ([(tr, s) for tr in t["traces"] for s in t["scales"]]
                                       or [(None, None)])
-                 for rtt in t["rtt_ms"]]
+                 for rtt in t["rtt_ms"] if not rtts or rtt in rtts]
         offsets, shaper = t.get("offsets_s"), t.get("shaper", "rattan")
         reps = len(offsets) if offsets else t["reps"]
         webrtc = t.get("transport", "quic") == "webrtc"
@@ -593,6 +595,7 @@ def main():
     ap.add_argument("--config", default=os.path.join(EXP, "config.toml"))
     ap.add_argument("--out", default=os.path.join(EXP, "results", "main"))
     ap.add_argument("--only", nargs="+", metavar="EXP", help="run only these tables of the config")
+    ap.add_argument("--rtt-ms", nargs="+", type=float, metavar="MS", help="run only these RTTs of the tables")
     ap.add_argument("--skip-check", action="store_true", help="skip step 1")
     a = ap.parse_args()
 
@@ -609,7 +612,7 @@ def main():
     log(f"run_all: config {os.path.relpath(a.config, REPO)}, out {out}, pid {os.getpid()}")
     save_config(a.config, out)
 
-    runs = plan_runs(cfg, a.only)
+    runs = plan_runs(cfg, a.only, a.rtt_ms)
     pending = [r for r in runs if not is_done(os.path.join(out, "runs", r["rel"]), r["viewpoints"])]
     # a session with any run left is run again as a whole
     left = {r["unit"] for r in pending}
