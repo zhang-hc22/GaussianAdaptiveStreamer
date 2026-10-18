@@ -141,6 +141,10 @@ def extend(runs):
         lat.append(pd.DataFrame({"trace": r.trace, "abr": r.abr, "rep": r.rep, "kind": "catchup", "ms": c}))
     ext = pd.DataFrame(rows, index=runs.index)
     runs = runs.drop(columns=[c for c in ext.columns if c in runs.columns]).join(ext)
+    webrtc = runs["abr"] == "webrtc-tms"
+    runs.loc[webrtc, "profile_mean"] = np.nan   # WebRTC has no profiles, QUIC no QP
+    if "qp_mean" in runs:
+        runs.loc[~webrtc, "qp_mean"] = np.nan
     return runs, pd.concat(lat, ignore_index=True)
 
 
@@ -185,7 +189,7 @@ def tables(runs):
 
 # ---- figures
 
-def log_axis(axis, ticks=(20, 30, 50, 100, 200, 500, 1000, 2000, 5000)):
+def log_axis(axis, ticks=(20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000)):
     """Log scale with plain numbers at the ticks inside the data range."""
     lo, hi = axis.get_view_interval()
     axis.set_ticks([t for t in ticks if lo <= t <= hi])
@@ -237,11 +241,10 @@ def fig_columns(runs, path, metrics=COLUMNS):
                     ax.hlines(v.mean(), x - 0.4, x + 0.4, color="black", lw=1.2 * SCALE, zorder=4)
         ax.set_xticks([i * (A + 1) + (A - 1) / 2 for i in range(len(TRACES))], list(TRACES.values()))
         ax.set_ylabel(METRICS[m])
-        if m in ("latency_ms", "latency_p95_ms", "catchup_p95_ms"):
-            ax.set_yscale("log")
-            log_axis(ax.yaxis)
+        if m in ("latency_ms", "latency_p95_ms", "catchup_p95_ms", "stall_share", "fps", "bandwidth_mbps"):
+            ax.set_ylim(bottom=0)
         if m in PERCENT:
-            ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
+            ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=1))
     h = [Line2D([], [], color=COLOR[s], marker="D" if s == "webrtc-tms" else "o", lw=0, label=LABEL[s])
          for s in SCHEMES]
     fig.legend(handles=h, loc="upper center", ncol=4, frameon=False)
@@ -254,7 +257,7 @@ def trace_steps(results, run, trace, w0):
     in ms since t0."""
     path = run["rattan"].get("trace")
     if not path or not os.path.exists(path):
-        path = os.path.join(results, "traces", trace + ".json")
+        path = os.path.join(results, "traces", (run.get("plan") or {}).get("trace_file", trace) + ".json")
     segs = segments(path)
     ts = np.array([s[0] for s in segs]) + (run["rattan"]["trace_start_ms"] - w0) / 1e3
     return ts, np.array([s[2] for s in segs]) / 1e6
@@ -280,7 +283,7 @@ def fig_timeseries(runs, path, rep=1, width=1.0):
     fig, axes = plt.subplots(1 + len(SCHEMES), 2, figsize=(15, 2.3 * (1 + len(SCHEMES))), sharex="col")
     for col, trace in enumerate(["bus_x8", "bus_x1"]):
         sel = runs[(runs["trace"] == trace) & (runs["rep"] == rep)]
-        top, end = [], 62
+        top, end, worst = [], 62, 100
         for k, s in enumerate(SCHEMES):
             r = sel[sel["abr"] == s]
             if not len(r):
@@ -305,9 +308,11 @@ def fig_timeseries(runs, path, rep=1, width=1.0):
             ax = axes[1 + k, col]
             ax.scatter((own["due"] - w0) / 1e3, own["drawn"] - own["due"], s=1.5, color=COLOR[s])
             ax.set_yscale("log")
-            ax.set_ylim(20, 5000)
-            log_axis(ax.yaxis, (20, 50, 100, 200, 500, 1000, 2000, 5000))
             ax.set_ylabel(f"{LABEL[s]}\nlatency (ms)")
+            worst = max(worst, (own["drawn"] - own["due"]).max())
+        for ax in axes[1:, col]:   # one latency range per column
+            ax.set_ylim(20, 1.3 * worst)
+            log_axis(ax.yaxis, (20, 50, 100, 200, 500, 1000, 2000, 5000))
         axes[0, col].set_ylim(0, 1.1 * max(top) if top else 1)
         axes[0, col].set_ylabel("Mbit/s")
         axes[0, col].set_title(TRACES[trace])
