@@ -16,6 +16,13 @@ directly with --server 127.0.0.1. Steps:
 
 Times in frames.ndjson are ms since t0.
 
+With --pacing tms viewpoint i is asked for at its time on the trajectory,
+t0 + W + tMs_i (due in frames.ndjson), one request at a time; the viewpoints
+that came due while a request was out are skipped (exp/runner.js). A skipped
+viewpoint has a line with "error": "skipped" and standin_i, the viewpoint
+whose frame was on screen while it was due; run.json counts them as skipped,
+not as failed. The default --pacing closed is runOnePlayback's.
+
 With --session the page plays several runs one after another, as the
 paper's runExperimentSequentialABRs (templates/player.html:1013) does: the
 same page and QUIC connection, a new ABR object per run and --gap-ms between
@@ -81,7 +88,7 @@ APPLY_RESOLUTION_JS = """res => {
     if (sel.value !== res) throw new Error(`the Resolution menu has no ${res}`);
     window.TIGAS.applyConfig();
 }"""
-TIMES = ("send", "req_start", "resp_start", "resp_end", "drawn")
+TIMES = ("due", "send", "req_start", "resp_start", "resp_end", "drawn")
 
 
 def main():
@@ -94,9 +101,11 @@ def main():
                     help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push; "
                     "webrtc: tigas_sender over WebRTC")
     ap.add_argument("--signaling-port", type=int, default=8888, help="--mode webrtc: peerconnection_server")
-    ap.add_argument("--pacing", choices=["tms", "closed"], default="tms",
-                    help="--mode webrtc: tms sends viewpoint i at t0 + W + tMs_i; closed sends the next "
-                    "one when the frame of the previous one has been read")
+    ap.add_argument("--pacing", choices=["tms", "closed"],
+                    help="tms sends viewpoint i at t0 + W + tMs_i (--mode player: skips the viewpoints "
+                    "that came due while a request was out); closed sends the next one when the frame "
+                    "of the previous one has been read. Default: tms for --mode webrtc, closed for "
+                    "--mode player")
     ap.add_argument("--warmup-mode", choices=["reverse", "pose0"], default="reverse",
                     help="--mode webrtc: what the page sends before t0 + W (exp/runner_webrtc.js)")
     ap.add_argument("--closed-timeout-ms", type=float, default=2000,
@@ -124,6 +133,12 @@ def main():
     ap.add_argument("--verbose-console", action="store_true",
                     help="keep the ABRs' console.log (off by default)")
     a = ap.parse_args()
+    if a.mode == "wt" and a.pacing:
+        ap.error("--mode wt has its own pacing (--event-ms)")
+    if a.mode == "player" and a.session and a.pacing == "tms":
+        ap.error("--pacing tms plays one run")
+    if a.mode != "wt":
+        a.pacing = a.pacing or ("tms" if a.mode == "webrtc" else "closed")
     if a.mode == "webrtc":
         if a.session:
             ap.error("--mode webrtc plays one run")
@@ -183,19 +198,21 @@ def main():
                 f["t_ms"] = ev.get("tMs")
                 fh.write(json.dumps(f) + "\n")
         frames = res["frames"]
-        failed = sum("error" in f for f in frames)
+        skipped = sum(f.get("error") == "skipped" for f in frames)
+        failed = sum("error" in f for f in frames) - skipped
         run.update(
             status="ok" if failed == 0 else "error",
             start_ms=res["start"] - t0_ms, end_ms=res["end"] - t0_ms,
-            camera=res["camera"], frames=len(frames), failed_frames=failed,
+            camera=res["camera"], frames=len(frames) - skipped, failed_frames=failed, skipped=skipped,
             profiles={p: sum(f.get("profile") == p for f in frames) for p in range(4)},
             page_errors=errors[-20:])
         if session:
             run["session"] = {"dir": a.out, "index": k + 1, "runs": len(plan),
                               "gap_ms": run["start_ms"] - runs[k - 1]["end_ms"] if k else None}
         save(run, out)
-        print(f"client: {run['args']['abr']} {len(frames)} frames in {(res['end'] - res['start']) / 1e3:.1f} s, "
-              f"profiles {list(run['profiles'].values())}, failed {failed}", flush=True)
+        print(f"client: {run['args']['abr']} {a.pacing} {len(frames) - skipped} frames in "
+              f"{(res['end'] - res['start']) / 1e3:.1f} s, profiles {list(run['profiles'].values())}, "
+              f"failed {failed}, skipped {skipped}", flush=True)
         return failed == 0
 
     def finish_wt(k, res):
@@ -394,7 +411,7 @@ def main():
                 res = page.evaluate("cfg => window.tigasRun(cfg)", {
                     "events": events, "abr": p["abr"], "seed": p["seed"], "run": k,
                     "startAtMs": (t0 + a.warmup) * 1e3, "delayMs": a.gap_ms if k else 0,
-                    "quiet": not a.verbose_console})
+                    "quiet": not a.verbose_console, "pacing": a.pacing})
                 ok = finish(k, res) and ok
                 done += 1
             browser.close()

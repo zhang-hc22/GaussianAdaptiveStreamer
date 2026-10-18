@@ -17,6 +17,10 @@ from the pose message the frame was rendered from; wait = first chunk - send;
 download = first to last chunk. Viewpoints never shown are left out like
 failed frames; fps counts every frame drawn and bandwidth every byte received
 (run.json "wt").
+/player runs with --pacing tms: latency = drawn - due, from the viewpoint's
+time on the trajectory (t0 + W + tMs) to drawing its frame, so it includes
+waiting for the request before; request_ms = drawn - send. Skipped
+viewpoints are left out like failed frames; skipped counts them.
 Per run: bandwidth used = all frame bytes / playback time; switches = frames
 whose profile differs from the previous frame; quality = mean over the
 frames in metrics/ (ours) and in metrics_paper/ (the paper's method,
@@ -177,6 +181,9 @@ def frame_table(r, run):
         fr["t_s"] = (fr["send"] - run["start_ms"]) / 1e3
         return fr
     fr["latency_ms"] = fr["drawn"] - fr["send"]
+    if run["args"].get("pacing") == "tms":
+        fr["request_ms"] = fr["latency_ms"]
+        fr["latency_ms"] = fr["drawn"] - fr["due"]
     if run["args"].get("mode") == "wt":
         first, last, sent = fr["first"], fr["drawn"], fr["msg"]
     else:
@@ -294,6 +301,11 @@ def run_row(r, run, fr, q, qp, steps, logs=None, ceil=None):
         "profile_mean": fr["profile"].mean(), "profile_median": fr["profile"].median(),
         "switches": int((fr["profile"].diff().fillna(0) != 0).sum()),
     })
+    if logs is None and run["args"].get("mode", "player") == "player":
+        row["pacing"] = run["args"].get("pacing") or "closed"
+        row["skipped"] = run.get("skipped", 0)
+        row["request_ms"] = fr["request_ms"].mean() if "request_ms" in fr else np.nan
+        row["standin_quality_frames"] = int(q["standin"].sum()) if q is not None and "standin" in q else 0
     if "wt" in run:
         row["fps"] = run["wt"]["drawn_in_playback"] / dur
         row["bandwidth_mbps"] = run["wt"]["bytes"] * 8 / dur / 1e6
@@ -598,7 +610,7 @@ def main():
 
     webrtc = cond["abr"].isin(set(runs.loc[runs["transport"] == "webrtc", "abr"]))
     show = ["trace", "rtt_ms", "abr", "runs", "duration_s", "latency_ms", "bandwidth_mbps",
-            "profile_mean", "switches", *METRICS]
+            "profile_mean", "switches", *(["skipped"] if "skipped" in cond else []), *METRICS]
     show_webrtc = ["trace", "rtt_ms", "abr", "runs", "duration_s", "latency_ms", "latency_p95_ms",
                    "bandwidth_mbps", "target_mbps", "qp_mean", "missing", "standins", "key_frames", *METRICS]
     with pd.option_context("display.width", 200, "display.max_columns", 30, "display.precision", 3):

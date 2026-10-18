@@ -23,6 +23,9 @@ column standin = 1). For each reference set of those runs, metrics/ceiling/
 gets the same metrics of the reference converted to I420 and back, the
 quality with no encoding at all.
 
+/player runs with --pacing tms score a skipped viewpoint with the frame on
+screen while it was due (standin_i in frames.ndjson; column standin = 1).
+
   python exp/metrics.py RESULTS_DIR [--stride 12] [--ffmpeg PATH]
 
 Writes <RESULTS_DIR>/metrics/<run path under runs/>.csv, one row per frame,
@@ -187,13 +190,19 @@ def run_metrics(results, r, stride, ffmpeg, piq_metrics, pool):
     frames = [json.loads(l) for l in open(os.path.join(r["dir"], "frames.ndjson"))]
     if run["args"].get("mode") == "webrtc":
         return run_metrics_webrtc(results, r, run, frames, stride, ffmpeg, piq_metrics, pool)
-    frames = [f for f in frames if f["i"] % stride == 0 and "error" not in f]
+    tms = run["args"].get("pacing") == "tms"
+    own = {f["i"]: f for f in frames if "error" not in f}
+    # (sampled viewpoint, the frame it is scored with)
+    pairs = [(f["i"], own[f["i"]] if "error" not in f else own.get(f.get("standin_i")))
+             for f in frames if f["i"] % stride == 0 and ("error" not in f or f["error"] == "skipped")]
+    pairs = [(i, f) for i, f in pairs if f is not None]
     gt = gt_dir(results, run["args"]["scene"], run["args"]["trajectory"], run["camera"])
-    ref_paths = [os.path.join(gt, f"{f['i']:06d}.png") for f in frames]
-    jobs = [(f["i"], os.path.join(r["dir"], "frames", f"{f['i']:06d}_p{f['profile']}.jpg"), f["profile"], ref)
-            for f, ref in zip(frames, ref_paths)]
-    rows = [{"i": f["i"], "profile": f["profile"], "bytes": f["bytes"]} for f in frames]
-    return score(jobs, rows, ref_paths, ffmpeg, piq_metrics, pool)
+    ref_paths = [os.path.join(gt, f"{i:06d}.png") for i, _ in pairs]
+    jobs = [(i, os.path.join(r["dir"], "frames", f"{f['i']:06d}_p{f['profile']}.jpg"), f["profile"], ref)
+            for (i, f), ref in zip(pairs, ref_paths)]
+    rows = [{"i": i, "profile": f["profile"], "bytes": f["bytes"], **({"standin": int(f["i"] != i)} if tms else {})}
+            for i, f in pairs]
+    return score(jobs, rows, ref_paths, ffmpeg, piq_metrics, pool) if jobs else []
 
 
 def write_csv(out, rows, fields):
@@ -222,6 +231,7 @@ def main():
         if run["status"] != "ok":
             continue
         webrtc = run["args"].get("mode") == "webrtc"
+        standins = webrtc or run["args"].get("pacing") == "tms"
         if webrtc:
             cam = run["camera"]
             ceilings.setdefault(os.path.join(results, "metrics", "ceiling", run["args"]["scene"],
@@ -234,10 +244,10 @@ def main():
         t = time.time()
         piq_metrics = piq_metrics or PiqMetrics()
         rows = run_metrics(results, r, a.stride, a.ffmpeg, piq_metrics, pool)
-        write_csv(out, rows, ["i", "profile", "bytes", *(["standin"] if webrtc else []), *METRICS])
+        write_csv(out, rows, ["i", "profile", "bytes", *(["standin"] if standins else []), *METRICS])
         done += 1
         means = "  ".join(f"{m} {np.nanmean([x[m] for x in rows]):.3f}" for m in METRICS) if rows else ""
-        extra = f", {sum(x['standin'] for x in rows)} stand-ins" if webrtc else ""
+        extra = f", {sum(x['standin'] for x in rows)} stand-ins" if standins else ""
         print(f"metrics: {r['rel']}: {len(rows)} frames{extra} ({time.time() - t:.0f} s)  {means}", flush=True)
     for out, run in ceilings.items():
         piq_metrics = piq_metrics or PiqMetrics()

@@ -29,6 +29,10 @@ exp/ablate.toml); the run directories then get a suffix after the trace:
   suffix _<session>. A session is run, retried and kept as a whole;
 - shaper = "tc-lo": tc on lo instead of rattan (run_one.py --shaper tc-lo);
   suffix _tclo. The qdisc on lo is removed before and after the matrix.
+A /player table with pacing = "tms" asks for viewpoint i at t0 + W + tMs_i
+and skips the viewpoints that came due while a request was out (client.py
+--pacing tms); the default is runOnePlayback's closed loop. Results of the
+two go to different --out directories, as their run paths are the same.
 A table with mode = "wt" plays through /player-wt, the WebTransport push
 mode (client.py --mode wt, abrs = ["throughput"], event_ms = 40). The
 server keeps rendering for a WebTransport session that was not closed
@@ -104,6 +108,8 @@ def plan_runs(cfg, only, rtts=None):
         webrtc = t.get("transport", "quic") == "webrtc"
         if webrtc and (offsets or t.get("sessions") or shaper != "rattan"):
             raise SystemExit(f"[{name}]: transport webrtc takes no offsets_s, sessions or shaper")
+        if not webrtc and t.get("pacing") == "tms" and (t.get("sessions") or t.get("mode", "player") != "player"):
+            raise SystemExit(f"[{name}]: pacing tms is for /player runs without sessions")
         abrs = [f"webrtc-{t['pacing']}"] if webrtc else t["abrs"]
         first = t.get("warmup_rate") == "first"
         if t.get("sessions"):
@@ -454,6 +460,8 @@ def client_args(s, r):
         out += ["--mode", "wt", "--event-ms", f"{r['event_ms']:g}"]
     if r["mode"] == "webrtc":
         out += ["--mode", "webrtc", "--pacing", r["pacing"], "--warmup-mode", r["warmup_mode"]]
+    elif r["mode"] == "player" and r["pacing"]:
+        out += ["--pacing", r["pacing"]]
     return out + (["--max-frames", str(r["max_viewpoints"])] if r["max_viewpoints"] else [])
 
 
