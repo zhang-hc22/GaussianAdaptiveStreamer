@@ -1,0 +1,3 @@
+[submodule "webrtc/sparkrtc"]
+	path = webrtc/sparkrtc
+	url = git@github.com:zhang-hc22/sparkrtc-for-tigas.git

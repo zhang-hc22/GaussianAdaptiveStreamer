@@ -199,7 +199,7 @@ WEBRTC_BIN=${WEBRTC_BIN:-webrtc/bin}
 if [[ ${CHECK_WEBRTC:-1} == 1 ]]; then
     for b in tigas_sender peerconnection_server; do
         if [[ ! -x $WEBRTC_BIN/$b ]]; then
-            fail "webrtc-$b" "$WEBRTC_BIN/$b missing (build it from sparkrtc)"
+            fail "webrtc-$b" "$WEBRTC_BIN/$b missing (build it from webrtc/sparkrtc)"
         elif missing=$(ldd "$WEBRTC_BIN/$b" 2>&1 | grep 'not found' | awk '{print $1}' | tr '\n' ' ') && [[ -n $missing ]]; then
             fail "webrtc-$b" "missing libraries: $missing"
         fi

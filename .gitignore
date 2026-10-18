@@ -6,3 +6,5 @@ captures
 experiment
 exp/results/
 webrtc/bin/
+# gclient puts the dependencies of webrtc/sparkrtc here (its third_party link)
+webrtc/third_party/
