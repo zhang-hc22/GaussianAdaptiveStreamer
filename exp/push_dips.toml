@@ -1,0 +1,181 @@
+# The push modes under deep dips of the bandwidth
+# (work/tigas-push-dips-plan.md): /player-wt over QUIC (exp/wt.toml) and
+# WebRTC push (exp/webrtc_push.toml) on one 87 s window of five traces, each
+# chosen for its seconds below what x264 at QP 51 needs:
+# - bus x8 from 0 s, as before; train x8 from 147 s; car x8 from 198 s
+#   (Ghent, per second, 0.1 Mbit/s floor);
+# - NYC 3109898-bus from 370 s and 3114405-bus from 82 s (mahimahi, per
+#   millisecond as recorded, 0 bps when nothing is delivered).
+#
+# quic: ThroughputABR, warm-up at 50 Mbit/s.
+# webrtc: tigas_sender --push_fps 60, MAE off, GCC as upstream.
+# mae: --enable_mae=true.
+# gcc: --gcc_ai=4 --gcc_mi=1.16; GCC's additive increase times 4 and its
+#   multiplicative increase 16 % a second instead of 8 %
+#   (WebRTC-Tigas-AimdIncrease, sparkrtc b3f26483a2).
+# gcc_mae: both.
+# WebRTC warms up in reverse at the window's first-second rate.
+#
+# The run paths do not show the group, so each has its own --out:
+#
+#   for g in quic webrtc mae gcc gcc_mae; do
+#     python exp/run_all.py --config exp/push_dips.toml --only ${g}_ghent ${g}_nyc \
+#       --out exp/results/dips-${g//_/-}
+#   done
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+[quic_ghent]
+mode = "wt"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus", "train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+abrs = ["throughput"]
+reps = 3
+
+[quic_nyc]
+mode = "wt"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+abrs = ["throughput"]
+reps = 3
+
+[webrtc_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus", "train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[webrtc_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
+
+[mae_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus", "train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[mae_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
+
+[gcc_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--gcc_ai=4", "--gcc_mi=1.16"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus", "train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[gcc_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--gcc_ai=4", "--gcc_mi=1.16"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
+
+[gcc_mae_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true", "--gcc_ai=4", "--gcc_mi=1.16"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus", "train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[gcc_mae_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true", "--gcc_ai=4", "--gcc_mi=1.16"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
