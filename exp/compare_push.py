@@ -33,7 +33,9 @@ and read (the last two only for frames requestVideoFrameCallback saw).
   python exp/compare_push.py --wt exp/results/wt --webrtc exp/results/webrtc-push [--out DIR]
 
 Writes runs.csv, tables.md and the figures (PDF and PNG) to --out (default
-<webrtc>/figs/compare-push).
+<webrtc>/figs/compare-push), laid out as those of exp/compare_tms.py; screen
+age takes the place of catch-up latency, which is the latency itself when
+nearly every viewpoint is drawn.
 """
 import argparse
 import json
@@ -46,7 +48,9 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from compare_tms import log_axis, save, trace_steps  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
+
+from compare_tms import DOT, SCALE, log_axis, save, trace_steps  # noqa: E402
 from summarize import COLOR  # noqa: E402
 
 RTT = 20
@@ -75,7 +79,8 @@ TABLES = {"latency": ["latency_ms", "latency_median_ms", "latency_p95_ms", "late
           "frames": ["repeat_share", "repeat_bytes", "frame_kb", "new_kb", "repeat_kb", "qp_new", "qp_repeat"]}
 PERCENT = {"lat_gt150", "lat_gt200", "shown", "repeat_share", "repeat_bytes", "age_gt150", "age_gt200",
            "age_gt300", "stall_share"}
-COLUMNS = ["latency_ms", "latency_p95_ms", "age_gt200", "fps", "psnr", "bandwidth_mbps"]
+COLUMNS = ["psnr", "vmaf", "lpips", "latency_ms", "latency_p95_ms", "age_gt200", "stall_share", "fps",
+           "bandwidth_mbps"]
 PARTS_WT = {"set → message": ("send", "msg"), "message → first chunk": ("msg", "first"),
             "first chunk → drawn": ("first", "drawn")}
 PARTS_WEBRTC = {"set → message": ("send", "msg"), "uplink": ("msg", "arrive"),
@@ -116,14 +121,15 @@ def frames_drawn(d, run):
 
 
 def screen_age(vp, fr, lo, hi):
-    """Time since the viewpoint of the frame on screen was set, every ms."""
+    """Time since the viewpoint of the frame on screen was set, every ms:
+    its shares and maximum, and the samples."""
     t = np.arange(lo, hi, 1.0)
     k = np.searchsorted(fr["drawn"].to_numpy(), t, side="right") - 1
     set_at = vp.set_index("i")["send"]
     age = t[k >= 0] - set_at.reindex(fr["i"].to_numpy()[k[k >= 0]].astype(int)).to_numpy()
     age = age[np.isfinite(age)]   # a warm-up frame still on screen
     return {"age_gt150": (age > 150).mean(), "age_gt200": (age > 200).mean(), "age_gt300": (age > 300).mean(),
-            "age_max_ms": age.max()}
+            "age_max_ms": age.max()}, age
 
 
 def measures(d, run, q):
@@ -138,6 +144,7 @@ def measures(d, run, q):
     gaps = np.diff(fr["drawn"].to_numpy())
     stall = gaps[gaps > STALL_MS]
     rep = fr["repeat"]
+    shares, age = screen_age(vp, fr, lo, hi)
     x = {"latency_ms": lat.mean(), "latency_median_ms": lat.median(), "latency_p95_ms": lat.quantile(0.95),
          "latency_max_ms": lat.max(), "lat_gt150": (lat > 150).mean(), "lat_gt200": (lat > 200).mean(),
          "shown": len(own) / len(vp), "fps": len(fr) / span,
@@ -146,8 +153,7 @@ def measures(d, run, q):
          "repeat_kb": fr.loc[rep, "bytes"].mean() / 1e3,
          "qp_new": fr.loc[~rep, "qp"].mean() if "qp" in fr else np.nan,
          "qp_repeat": fr.loc[rep, "qp"].mean() if "qp" in fr else np.nan,
-         "stalls_min": len(stall) / (span / 60), "stall_share": stall.sum() / 1e3 / span,
-         **screen_age(vp, fr, lo, hi)}
+         "stalls_min": len(stall) / (span / 60), "stall_share": stall.sum() / 1e3 / span, **shares}
     parts = PARTS_WT if "wt" in run else PARTS_WEBRTC
     for k, (a, b) in parts.items():
         x["part " + k] = (own[b] - own[a]).mean() if a in own and b in own else np.nan
@@ -155,7 +161,7 @@ def measures(d, run, q):
     for m in ("psnr", "ssim", "vmaf", "lpips"):
         qq = q[q["standin"] == 0] if q is not None and "standin" in q else q
         x[m] = qq[m].mean() if qq is not None and len(qq) else np.nan
-    return x, lat.to_numpy()
+    return x, lat.to_numpy(), age
 
 
 def extend(runs):
@@ -166,9 +172,10 @@ def extend(runs):
         rel = os.path.relpath(d, os.path.join(r.results, "runs"))
         path = os.path.join(r.results, "metrics", rel + ".csv")
         q = pd.read_csv(path) if os.path.exists(path) else None
-        x, l = measures(d, run, q)
+        x, l, age = measures(d, run, q)
         rows.append(x)
-        lat.append(pd.DataFrame({"trace": r.trace, "abr": r.abr, "rep": r.rep, "ms": l}))
+        for kind, v in (("latency", l), ("age", age)):
+            lat.append(pd.DataFrame({"trace": r.trace, "abr": r.abr, "rep": r.rep, "kind": kind, "ms": v}))
     ext = pd.DataFrame(rows, index=runs.index)
     runs = runs.drop(columns=[c for c in ext.columns if c in runs.columns]).join(ext)
     return runs, pd.concat(lat, ignore_index=True)
@@ -219,45 +226,51 @@ def style(s):
 
 
 def fig_cdf(lat, path):
-    """Latency of the viewpoints shown, one panel per trace; no title or
-    legend (QUIC dashed, WebRTC solid)."""
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), sharey=True)
-    for ax, (trace, name) in zip(axes, TRACES.items()):
-        for s in SCHEMES:
-            v = np.sort(lat[(lat["trace"] == trace) & (lat["abr"] == s)]["ms"].dropna().to_numpy())
-            if len(v):
-                ax.plot(v, np.arange(1, len(v) + 1) / len(v), **style(s))
-        ax.set_xscale("log")
-        ax.set_xlim(left=20)
-        log_axis(ax.xaxis, (20, 30, 50, 100, 200, 500, 1000))
-        ax.set_xlabel(f"{name}: latency (ms)")
-        ax.grid(alpha=0.3)
-    axes[0].set_ylabel("CDF")
+    """Top row latency of the viewpoints shown, bottom row screen age over
+    playback time; one column per trace. No title or legend (QUIC dashed,
+    WebRTC solid)."""
+    fig, axes = plt.subplots(2, 3, figsize=(13, 7), sharey=True)
+    for row, kind in enumerate(["latency", "age"]):
+        for ax, (trace, name) in zip(axes[row], TRACES.items()):
+            for s in SCHEMES:
+                v = lat[(lat["trace"] == trace) & (lat["abr"] == s) & (lat["kind"] == kind)]["ms"]
+                v = np.sort(v.dropna().to_numpy())
+                if len(v):
+                    ax.plot(v, np.arange(1, len(v) + 1) / len(v), **style(s))
+            ax.set_xscale("log")
+            ax.set_xlim(left=20)
+            log_axis(ax.xaxis, (20, 30, 50, 100, 200, 500, 1000))   # sparse: the QUIC stalls reach 1.7 s
+            ax.set_xlabel(f"{name}: {'latency' if kind == 'latency' else 'screen age'} (ms)")
+        axes[row, 0].set_ylabel("CDF")
     fig.tight_layout()
     save(fig, path)
 
 
 def fig_columns(runs, path):
     """One dot per run, black bar = mean."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(3, 3, figsize=(15, 11))
     A = len(SCHEMES)
     for ax, m in zip(axes.flat, COLUMNS):
+        top = 0
         for i, trace in enumerate(TRACES):
             for j, s in enumerate(SCHEMES):
                 x = i * (A + 1) + j
                 v = runs[(runs["trace"] == trace) & (runs["abr"] == s)][m].dropna()
-                ax.scatter(x + (JITTER.random(len(v)) - 0.5) * 0.3, v, s=18, color=COLOR[s], zorder=3,
+                ax.scatter(x + (JITTER.random(len(v)) - 0.5) * 0.3, v, s=DOT, color=COLOR[s], zorder=3,
                            marker="D" if s == "webrtc-push" else "o")
                 if len(v):
-                    ax.hlines(v.mean(), x - 0.4, x + 0.4, color="black", lw=1.5, zorder=4)
+                    ax.hlines(v.mean(), x - 0.4, x + 0.4, color="black", lw=1.2 * SCALE, zorder=4)
+                    top = max(top, v.max())
         ax.set_xticks([i * (A + 1) + (A - 1) / 2 for i in range(len(TRACES))], list(TRACES.values()))
         ax.set_ylabel(METRICS[m])
+        if m in ("latency_ms", "latency_p95_ms", "age_gt200", "stall_share", "fps", "bandwidth_mbps"):
+            ax.set_ylim(0, 1.08 * top or 1)   # room above the 60 frames/s
         if m in PERCENT:
             ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=1))
-        if m != "psnr":
-            ax.set_ylim(bottom=0)
-        ax.grid(alpha=0.3, axis="y")
-    fig.tight_layout()
+    h = [Line2D([], [], color=COLOR[s], marker="D" if s == "webrtc-push" else "o", lw=0, label=LABEL[s])
+         for s in SCHEMES]
+    fig.legend(handles=h, loc="upper center", ncol=len(SCHEMES), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     save(fig, path)
 
 
@@ -275,8 +288,8 @@ def sent_rate(d, run, w0, bins):
 
 
 def fig_timeseries(runs, path, rep=1):
-    """One repetition each of bus x8 and x1: trace (grey) and rate per scheme
-    (1 s bins), then the latency of each scheme's viewpoints shown."""
+    """One repetition each of bus x8 and x1: trace (black) and rate per
+    scheme (1 s bins), then the latency of each scheme's viewpoints shown."""
     fig, axes = plt.subplots(1 + len(SCHEMES), 2, figsize=(15, 2.3 * (1 + len(SCHEMES))), sharex="col")
     for col, trace in enumerate(["bus_x8", "bus_x1"]):
         sel = runs[(runs["trace"] == trace) & (runs["rep"] == rep)]
@@ -293,11 +306,11 @@ def fig_timeseries(runs, path, rep=1):
                 ts, bw = trace_steps(r.results, run, trace, w0)
                 keep = ts <= end
                 axes[0, col].step(np.append(ts[keep], end), np.append(bw[keep], bw[keep][-1:]), where="post",
-                                  color="0.6", lw=2)
+                                  color="black", lw=0.8 * SCALE)
                 top += list(bw[(np.append(ts[1:], np.inf) > 0.5) & keep])
             bins = np.arange(0, end + 1, 1.0)
             rate = sent_rate(d, run, w0, bins)
-            axes[0, col].step(bins[:-1], rate, where="post", lw=1, **style(s))
+            axes[0, col].step(bins[:-1], rate, where="post", lw=0.8 * SCALE, **style(s))
             top.append(rate.max())
             vp = ndjson(os.path.join(d, "frames.ndjson"))
             own = vp[vp["drawn"].notna()] if "drawn" in vp else vp.iloc[:0]
@@ -306,12 +319,12 @@ def fig_timeseries(runs, path, rep=1):
             ax.set_yscale("log")
             ax.set_ylabel(f"{LABEL[s]}\nlatency (ms)")
             worst = max(worst, (own["drawn"] - own["send"]).max())
-        for ax in axes[1:, col]:
+        for ax in axes[1:, col]:   # one latency range per column
             ax.set_ylim(20, 1.3 * worst)
             log_axis(ax.yaxis, (20, 50, 100, 200, 500, 1000, 2000))
-            ax.grid(alpha=0.3)
         axes[0, col].set_ylim(0, 1.1 * max(top) if top else 1)
-        axes[0, col].set_ylabel(f"{TRACES[trace]}\nMbit/s")
+        axes[0, col].set_ylabel("Mbit/s")
+        axes[0, col].set_title(TRACES[trace])
         axes[-1, col].set_xlabel("time (s)")
         axes[-1, col].set_xlim(-0.5, end)
     fig.tight_layout()
