@@ -1252,8 +1252,77 @@
         WT_ReceiveImage(reader);
     });
 
-    
 
+
+</script>
+
+<script>
+    // Hooks for the headless experiment client (exp/client.py --mode wt,
+    // exp/runner_wt.js). The page state lives in top-level `let`/`const`
+    // variables, which are not properties of window, so they are exported
+    // here. The wrappers only watch the pose messages and the frames; what
+    // the page sends and draws does not change.
+    window.TIGAS = {
+        applyConfig,
+        setPose(ev) {
+            angle = Number(ev.angle);
+            elevation = Number(ev.elevation);
+            x = Number(ev.x);
+            y = Number(ev.y);
+            z = Number(ev.z);
+        },
+        camera: () => ({ angle, elevation, x, y, z, fx, fy, cx, cy, width, height }),
+        abr: () => throughputABR,
+        sent: new Map(),   // timestemp of a recent pose message -> {profile, width, height}
+        last: null,        // the last frame drawn: {ts, at, profile, width, height}
+        onSend: null,      // (message, epoch ms), set by runner_wt.js
+        onChunk: null,     // (header, epoch ms, blob when this chunk completed the frame)
+        writer: null,
+        // what the page sends on beforeunload, which a browser closed by
+        // Playwright does not fire; the server then stops rendering for it
+        close() {
+            if (this.writer) return this.writer.write(encodeMessage('{"closed":"1"}'));
+        },
+    };
+    (() => {
+        const T = window.TIGAS;
+        const now = () => performance.timeOrigin + performance.now();
+        const encode = encodeMessage;
+        encodeMessage = function (msg) {
+            const m = JSON.parse(msg);
+            if (m.timestemp !== undefined) {
+                T.sent.set(m.timestemp, { profile: m.profile, width: m.width, height: m.height });
+                if (T.sent.size > 2000) T.sent.delete(T.sent.keys().next().value);
+                if (T.onSend) T.onSend(m, now());
+            }
+            return encode(msg);
+        };
+        const sendConfig = WT_SendCameraConfig;
+        WT_SendCameraConfig = function (writer) {
+            T.writer = writer;
+            return sendConfig(writer);
+        };
+        let drawn = null;
+        const render = renderImage;
+        renderImage = function (blob, renderMs) {
+            drawn = blob;
+            return render(blob, renderMs);
+        };
+        const handle = handleChunks;
+        handleChunks = function (data) {
+            const t = now();
+            const v = new DataView(data.buffer, data.byteOffset, 18);
+            const h = {
+                id: v.getUint32(0), idx: v.getUint8(4), total: v.getUint8(5),
+                ts: Number(v.getBigUint64(6, false)), renderMs: v.getFloat32(14, false),
+                bytes: data.byteLength - 18,
+            };
+            drawn = null;
+            handle(data);
+            if (drawn) T.last = { ts: h.ts, at: t, ...T.sent.get(h.ts) };
+            if (T.onChunk) T.onChunk(h, t, drawn);
+        };
+    })();
 </script>
 
 </body>

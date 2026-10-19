@@ -1,0 +1,40 @@
+# Experiment matrix for exp/run_all.py. Each table other than [server] is one
+# experiment; run_all.py runs every combination of its lists, rep times.
+#
+# traces: Ghent traces (traces/<name>.csv), each at every scale; [] means no
+#   bandwidth limit, only the delay.
+# scales: 8 = the measured throughput, 1 = the values stored in the file.
+# max_viewpoints (optional): play only the first N viewpoints.
+
+[server]
+resolution = "1280x720"  # picked in /player's Resolution menu, as in the paper (the
+                         # trajectories were recorded at 800x600; only their poses are used)
+warmup_s = 10            # W: high-bandwidth start of every trace, playback starts at t0 + W
+timeout_s = 900          # per run
+metric_stride = 12       # quality metrics on every 12th viewpoint
+
+[ghent]                  # paper figures 5 and 7, local setup
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+reps = 9
+
+[rtt_bus]                # paper figure 8 under the bus trace; 20 ms is in [ghent]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [5, 10, 40, 80]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3
+
+[rtt]                    # paper figure 8 without a bandwidth limit
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [5, 10, 20, 40, 80]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3

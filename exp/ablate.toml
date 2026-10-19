@@ -1,0 +1,58 @@
+# Ablations of four ways the paper ran its experiments.
+# Each table restores one of them; everything else is config.toml [ghent] at
+# bus x8, RTT 20 ms. The fourth, the trace unit (x8 against x1), needs no new
+# runs: config.toml has both.
+#
+#   python exp/run_all.py --config exp/ablate.toml --out exp/results/ablate
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+trace_total_s = 7200     # a session plays about 45 min of the trace
+session_timeout_s = 6000
+session_gap_ms = 150     # between the runs of a session, templates/player.html:1051
+paper_metrics = false    # quality with our method only
+
+[base]                   # the baseline again with this code, against r720 [ghent] x8
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3
+
+[a1_phase]               # A1: playback starts phi s into the trace; one run per phi and ABR
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+offsets_s = [34, 101, 169, 236, 304, 371, 438, 506, 573]   # round((i + 0.5) * 607 / 9)
+
+[a2_session]             # A2: 9 runs per ABR in one page, the trace not restarted
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+reps = 9
+
+[a2_session.sessions]    # ABR order; S1 is the paper's (templates/player.html:1014)
+S1 = ["simple", "l2a", "lol+"]
+S2 = ["l2a", "lol+", "simple"]
+S3 = ["lol+", "simple", "l2a"]
+
+[a3_tclo]                # A3: tc on lo, both directions in one htb class
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+shaper = "tc-lo"
+reps = 9

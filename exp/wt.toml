@@ -1,0 +1,35 @@
+# The WebTransport push mode (/player-wt, client.py --mode wt) under the
+# networks of the /player runs in results/r720: [ghent] of config.toml and
+# its 20 ms row of [rtt]. The page's own ABR (ThroughputABR) picks the
+# profile; one viewpoint every event_ms, as the page's runOnePlayback does.
+#
+#   python exp/run_all.py --config exp/wt.toml --out exp/results/wt
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false    # metrics_paper.py re-encodes with /render's JPEG quality;
+                         # gs_app.RenderAndSendImage uses 70 - profile
+
+[wt_bus]
+mode = "wt"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+abrs = ["throughput"]
+reps = 9
+
+[wt_none]
+mode = "wt"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [20]
+abrs = ["throughput"]
+reps = 3
