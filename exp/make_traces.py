@@ -15,7 +15,8 @@ ablation A1: the trace had played phi s when playback began).
 value per line and without the warm-up (the loop adds it).
 
 rattan starts the trace at the first packet it forwards; client.py takes t0
-just before that (phase 0 measured 3.4 ms), so trace time is t - t0.
+just before that (3.4 ms before, measured with a step trace), so trace
+time is t - t0.
 
   python exp/make_traces.py bus --scale 8 --out bus_x8.json
   python exp/make_traces.py bus --scale 8 --offset 101 --out bus_x8_phi101.json

@@ -6,7 +6,8 @@ Per frame (frames.ndjson; times in ms since t0):
 - network time: responseEnd - requestStart of the /render request;
 - render time: what the server reported;
 - transfer rate: (bytes - 1200) * 8 / (responseEnd - responseStart), frames
-  of at least 3 kB only (as exp/phase2/check_trace.py).
+  of at least 3 kB only (the first packet carries the headers, the rest
+  arrives at the bottleneck rate).
 - wait: responseStart - send, until the first byte of the frame arrived;
   download: responseEnd - responseStart.
 Runs of the WebTransport push mode (client.py --mode wt) have one line per
