@@ -46,6 +46,9 @@ the trace to the Ghent trace's value at its second 0 (trace file
 <trace>_wfirst.json; the default is 50 Mbit/s). Such runs need no QUIC
 server: one render worker (webrtc/render_worker.py) serves all of them, and
 each run starts its own signaling server and tigas_sender.
+sender_args = [...] passes extra tigas_sender flags (run_one.py --sender-arg),
+as in exp/webrtc_drop.toml. They are not in the run paths, so tables with
+different sender_args go to different --out directories.
 
   python exp/run_all.py [--config exp/config.toml] [--out exp/results/main]
                         [--only TABLE ...] [--rtt-ms MS ...]
@@ -110,6 +113,8 @@ def plan_runs(cfg, only, rtts=None):
             raise SystemExit(f"[{name}]: transport webrtc takes no offsets_s, sessions or shaper")
         if not webrtc and t.get("pacing") == "tms" and (t.get("sessions") or t.get("mode", "player") != "player"):
             raise SystemExit(f"[{name}]: pacing tms is for /player runs without sessions")
+        if not webrtc and t.get("sender_args"):
+            raise SystemExit(f"[{name}]: sender_args is for transport webrtc")
         abrs = [f"webrtc-{t['pacing']}"] if webrtc else t["abrs"]
         first = t.get("warmup_rate") == "first"
         if t.get("sessions"):
@@ -133,7 +138,7 @@ def plan_runs(cfg, only, rtts=None):
                      "abr": abr, "rep": rep, "seed": rep,
                      "session": sname, "session_index": k if sname else None,
                      "viewpoints": min(n, t.get("max_viewpoints") or n),
-                     "max_viewpoints": t.get("max_viewpoints")}
+                     "max_viewpoints": t.get("max_viewpoints"), "sender_args": t.get("sender_args", [])}
                 # the file of the trace; its warm-up rate is not in the run path
                 r["trace_file"] = r["trace_name"] + ("_wfirst" if first else "")
                 r["rel"] = run_rel(scene, traj, label, rtt, abr, rep)
@@ -444,7 +449,7 @@ def warm_up_webrtc(out, runs, resolution, worker):
 
 def meta(r):
     return {k: r[k] for k in ("exp", "mode", "label", "trace_name", "trace_file", "offset_s", "shaper",
-                              "session", "session_index", "pacing", "warmup_mode", "warmup_rate")}
+                              "session", "session_index", "pacing", "warmup_mode", "warmup_rate", "sender_args")}
 
 
 def shaper_args(r, trace_path):
@@ -467,7 +472,8 @@ def client_args(s, r):
 
 def run_one(cfg, out, r, trace_path, worker):
     s = cfg["server"]
-    webrtc = (["--transport", "webrtc", "--render-socket", worker.socket, "--render-log", worker.log]
+    webrtc = (["--transport", "webrtc", "--render-socket", worker.socket, "--render-log", worker.log,
+               *[f"--sender-arg={x}" for x in r["sender_args"]]]
               if r["mode"] == "webrtc" else [])
     cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}", *shaper_args(r, trace_path),
            *webrtc, "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"]),
