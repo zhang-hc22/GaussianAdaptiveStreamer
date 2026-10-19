@@ -449,13 +449,17 @@ def warm_up_webrtc(out, runs, resolution, worker):
     for scene in sorted({r["scene"] for r in runs if r["mode"] == "webrtc"}):
         traj = next(r["trajectory"] for r in runs if r["scene"] == scene)
         d = os.path.join(out, "warmup", "webrtc", scene)
-        shutil.rmtree(d, ignore_errors=True)
-        rc, text = call([sys.executable, "exp/run_one.py", "--transport", "webrtc", "--shaper", "none",
-                         "--render-socket", worker.socket, "--timeout", "120", "--out", d, "--",
-                         "--mode", "webrtc", "--scene", scene, "--trajectory", traj, "--max-frames", "36",
-                         "--resolution", resolution, "--warmup", "5"], stop_group=False)
-        if rc != 0:
-            raise SystemExit(f"WebRTC warm-up of {scene} failed: {last_line(rc, text)}")
+        for attempt in (1, 2):   # the page now and then decodes 35 of the 36 frames
+            shutil.rmtree(d, ignore_errors=True)
+            rc, text = call([sys.executable, "exp/run_one.py", "--transport", "webrtc", "--shaper", "none",
+                             "--render-socket", worker.socket, "--timeout", "120", "--out", d, "--",
+                             "--mode", "webrtc", "--scene", scene, "--trajectory", traj, "--max-frames", "36",
+                             "--resolution", resolution, "--warmup", "5"], stop_group=False)
+            if rc == 0:
+                break
+            if attempt == 2:
+                raise SystemExit(f"WebRTC warm-up of {scene} failed twice: {last_line(rc, text)}")
+            log(f"warm-up: {scene} over WebRTC failed ({last_line(rc, text)}), once more")
         run = json.load(open(os.path.join(d, "run.json")))
         log(f"warm-up: {scene} over WebRTC, data channel open after "
             f"{run['webrtc']['times'].get('dc_open', float('nan')) / 1e3:.2f} s, {run['frames']} frames")
