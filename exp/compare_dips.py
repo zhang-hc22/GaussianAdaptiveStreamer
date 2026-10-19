@@ -295,7 +295,7 @@ def fig_cdf(lat, path):
     """Top row latency of the viewpoints shown, bottom row screen age over
     playback time; one column per trace. No title or legend (colors as
     COLOR, QUIC dashed)."""
-    fig, axes = plt.subplots(2, len(TRACES), figsize=(4.3 * len(TRACES), 7), sharey=True)
+    fig, axes = plt.subplots(2, len(TRACES), figsize=(4.6 * len(TRACES), 7), sharey=True)
     for row, kind in enumerate(["latency", "age"]):
         for ax, (trace, name) in zip(axes[row], TRACES.items()):
             for g in GROUPS:
@@ -305,7 +305,7 @@ def fig_cdf(lat, path):
                     ax.plot(v, np.arange(1, len(v) + 1) / len(v), **style(g))
             ax.set_xscale("log")
             ax.set_xlim(left=20)
-            log_axis(ax.xaxis, (20, 50, 100, 200, 500, 1000, 5000))
+            log_axis(ax.xaxis, (20, 50, 200, 1000, 5000, 20000))   # sparse: QUIC reaches 37 s
             ax.set_xlabel(f"{name}: {'latency' if kind == 'latency' else 'screen age'} (ms)")
         axes[row, 0].set_ylabel("CDF")
     fig.tight_layout()
@@ -314,7 +314,7 @@ def fig_cdf(lat, path):
 
 def fig_columns(runs, path):
     """One dot per run, black bar = mean."""
-    fig, axes = plt.subplots(3, 3, figsize=(18, 11))
+    fig, axes = plt.subplots(3, 3, figsize=(19, 12))
     A = len(GROUPS)
     for ax, m in zip(axes.flat, COLUMNS):
         top = 0
@@ -327,10 +327,13 @@ def fig_columns(runs, path):
                 if len(v):
                     ax.hlines(v.mean(), x - 0.4, x + 0.4, color="black", lw=1.2 * SCALE, zorder=4)
                     top = max(top, v.max())
-        ax.set_xticks([i * (A + 1) + (A - 1) / 2 for i in range(len(TRACES))], list(TRACES.values()),
-                      fontsize="small")
+        ax.set_xticks([i * (A + 1) + (A - 1) / 2 for i in range(len(TRACES))],
+                      [n.replace("NYC ", "NYC\n") for n in TRACES.values()])
         ax.set_ylabel(METRICS[m])
-        if m in ("latency_ms", "latency_p95_ms", "age_gt200", "stall_share", "bandwidth_mbps", "shown"):
+        if m in ("latency_ms", "latency_p95_ms"):   # QUIC's backlog on the NYC traces reaches 30 s
+            ax.set_yscale("log")
+            log_axis(ax.yaxis, (50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000))
+        elif m in ("age_gt200", "stall_share", "bandwidth_mbps", "shown"):
             ax.set_ylim(0, 1.08 * top or 1)
         if m in PERCENT:
             ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0, decimals=0))
