@@ -36,7 +36,9 @@ uplink (arrive - send, page to tigas_sender), queue (render_start - arrive),
 render (render_end - render_start, the render worker round trip), encode
 (enc - render_end), pacer (pkt - enc, until the first packet left), network
 (recv - pkt, until the last packet arrived) and read (dec - recv: jitter
-buffer, decoding and the track reader). recv comes from
+buffer, decoding and the track reader). With pacing push, send is when the
+viewpoint was set, so uplink also has the wait for the page's next message
+and queue the wait for the sender's next push tick. recv comes from
 requestVideoFrameCallback, so frames never presented have no network and
 read parts; the breakdown figure uses the frames with all parts. wait = pkt
 - send and net = recv - pkt; download and the per-frame rate are not
@@ -88,12 +90,13 @@ from common import REPO, find_runs, traj_name  # noqa: E402
 from make_traces import segments  # noqa: E402
 
 ABRS = ["simple", "l2a", "lol+"]   # /player; abrs_in() puts others after them
-WEBRTC = ["webrtc-tms", "webrtc-closed"]
+WEBRTC = ["webrtc-tms", "webrtc-closed", "webrtc-push"]
 LABEL = {"simple": "Latency", "l2a": "L2A", "lol+": "LoL+",   # names in the paper
          "throughput": "Throughput (WT)", "webrtc-tms": "WebRTC tms", "webrtc-closed": "WebRTC closed",
+         "webrtc-push": "WebRTC push",
          "webrtc-tms-pose0": "WebRTC tms pose0"}  # the last one only in the warm-up checks
 COLOR = {"simple": "#1b9e77", "l2a": "#d95f02", "lol+": "#7570b3", "throughput": "#e7298a",
-         "webrtc-tms": "#66a61e", "webrtc-closed": "#e6ab02"}
+         "webrtc-tms": "#66a61e", "webrtc-closed": "#e6ab02", "webrtc-push": "#a6761d"}
 # latency parts of a WebRTC viewpoint: column, label, from, to
 PARTS = [("uplink_ms", "uplink", "send", "arrive"), ("queue_ms", "queue", "arrive", "render_start"),
          ("worker_ms", "render", "render_start", "render_end"), ("encode_ms", "encode", "render_end", "enc"),

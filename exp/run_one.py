@@ -34,7 +34,9 @@ directory:
   qp, key frame, encode done and first packet sent, ms since t0);
 - render_worker.ndjson: the worker's lines of this run, if --render-log;
 - in frames.ndjson, per viewpoint: arrive, render_start, render_end,
-  queue_ahead (sender_frames), bytes, qp, key, enc, pkt (sender_encoded);
+  queue_ahead (sender_frames), bytes, qp, key, enc, pkt (sender_encoded),
+  all of the frame the page read first for it (with --push_fps the sender
+  renders a viewpoint more than once);
 - run.json "sender": the switches, field trials, build, exit code, counts.
 --shaper none runs the client without shaping, at 127.0.0.1 (a local check).
 
@@ -456,11 +458,13 @@ def annotate_sender(out, t0, rc, bin_dir, render_log, t_start, t_end):
 
     by_rtp = {e["rtp_ts"]: e for e in enc}
     by_i = {f["i"]: f for f in rendered}
+    rendered_by_rtp = {f["rtp_ts"]: f for f in rendered if "rtp_ts" in f}
     path = os.path.join(out, "frames.ndjson")
     if os.path.exists(path):
         lines = []
         for f in read_ndjson(path):
-            s = by_i.get(f["i"])
+            # a viewpoint without a frame read: its render, if it had one
+            s = rendered_by_rtp.get(f["rtp_ts"]) if f.get("rtp_ts") is not None else by_i.get(f["i"])
             if s:
                 f.update(arrive=rel(s["t_arrive"]), render_start=rel(s["t_render_start"]),
                          render_end=rel(s["t_render_end"]), queue_ahead=s["queue_ahead"],

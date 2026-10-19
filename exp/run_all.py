@@ -39,8 +39,10 @@ server keeps rendering for a WebTransport session that was not closed
 (gs_app.TimedSend), so it is restarted before every such run.
 A table with transport = "webrtc" plays over WebRTC instead
 (run_one.py --transport webrtc, client.py --mode webrtc):
-pacing = "tms" or "closed" takes the place of abrs (the run
-directory's ABR level is webrtc-<pacing>), warmup_mode = "reverse"
+pacing = "tms", "closed" or "push" takes the place of abrs (the run
+directory's ABR level is webrtc-<pacing>); push streams like /player-wt,
+one viewpoint every event_ms (default 40) and tigas_sender --push_fps
+push_fps (default 60), as in exp/webrtc_push.toml; warmup_mode = "reverse"
 (default) or "pose0", and warmup_rate = "first" sets the warm-up segment of
 the trace to the Ghent trace's value at its second 0 (trace file
 <trace>_wfirst.json; the default is 50 Mbit/s). Such runs need no QUIC
@@ -115,6 +117,8 @@ def plan_runs(cfg, only, rtts=None):
             raise SystemExit(f"[{name}]: pacing tms is for /player runs without sessions")
         if not webrtc and t.get("sender_args"):
             raise SystemExit(f"[{name}]: sender_args is for transport webrtc")
+        if webrtc and t.get("pacing") not in ("tms", "closed", "push"):
+            raise SystemExit(f"[{name}]: transport webrtc needs pacing tms, closed or push")
         abrs = [f"webrtc-{t['pacing']}"] if webrtc else t["abrs"]
         first = t.get("warmup_rate") == "first"
         if t.get("sessions"):
@@ -129,7 +133,7 @@ def plan_runs(cfg, only, rtts=None):
                 label = (trace_name(trace, scale) + ("_phi" if offsets else "")
                          + (f"_{sname}" if sname else "") + ("_tclo" if shaper == "tc-lo" else ""))
                 r = {"exp": name, "mode": "webrtc" if webrtc else t.get("mode", "player"),
-                     "event_ms": t.get("event_ms", 40),
+                     "event_ms": t.get("event_ms", 40), "push_fps": t.get("push_fps", 60),
                      "pacing": t.get("pacing"), "warmup_mode": t.get("warmup_mode", "reverse"),
                      "warmup_rate": "first" if first else None,
                      "scene": scene, "trajectory": traj, "trace": trace,
@@ -465,6 +469,8 @@ def client_args(s, r):
         out += ["--mode", "wt", "--event-ms", f"{r['event_ms']:g}"]
     if r["mode"] == "webrtc":
         out += ["--mode", "webrtc", "--pacing", r["pacing"], "--warmup-mode", r["warmup_mode"]]
+        if r["pacing"] == "push":
+            out += ["--event-ms", f"{r['event_ms']:g}"]
     elif r["mode"] == "player" and r["pacing"]:
         out += ["--pacing", r["pacing"]]
     return out + (["--max-frames", str(r["max_viewpoints"])] if r["max_viewpoints"] else [])
@@ -472,8 +478,9 @@ def client_args(s, r):
 
 def run_one(cfg, out, r, trace_path, worker):
     s = cfg["server"]
+    push = [f"--push_fps={r['push_fps']}"] if r["pacing"] == "push" else []
     webrtc = (["--transport", "webrtc", "--render-socket", worker.socket, "--render-log", worker.log,
-               *[f"--sender-arg={x}" for x in r["sender_args"]]]
+               *[f"--sender-arg={x}" for x in push + r["sender_args"]]]
               if r["mode"] == "webrtc" else [])
     cmd = [sys.executable, "exp/run_one.py", "--rtt", f"{r['rtt_ms']:g}", *shaper_args(r, trace_path),
            *webrtc, "--timeout", str(s["timeout_s"]), "--out", os.path.join(out, "runs", r["rel"]),

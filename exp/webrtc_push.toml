@@ -1,0 +1,41 @@
+# WebRTC streaming the way /player-wt does over WebTransport (exp/wt.toml),
+# under the same networks: viewpoint k is set at start + k * event_ms, the
+# page sends the current viewpoint every 10 ms, and tigas_sender renders the
+# latest one push_fps times a second, also when it has not changed
+# (gs_app.TimedSend). x264 and GCC as in exp/webrtc.toml, with its warm-up
+# (reverse, at the trace's second-0 rate).
+#
+#   python exp/run_all.py --config exp/webrtc_push.toml --out exp/results/webrtc-push
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+[ghent_push]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[none_push]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [20]
+reps = 3

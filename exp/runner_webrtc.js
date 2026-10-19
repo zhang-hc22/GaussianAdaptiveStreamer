@@ -12,11 +12,18 @@
 //
 // Pacing: "tms" sends viewpoint i at startAtMs + tMs_i; "closed" sends the
 // next viewpoint when the frame of the previous one has been read (as /player
-// does with requests), or after closedTimeoutMs.
+// does with requests), or after closedTimeoutMs; "push" streams like
+// /player-wt (templates/player_wt.html): viewpoint i is set at startAtMs +
+// i * eventMs, and a loop sends the current viewpoint, waits poseMs and
+// sends it again, {i, s, body} with s counting the messages. tigas_sender
+// then runs with --push_fps and renders the latest viewpoint at that rate,
+// so a viewpoint can have several frames, or none; the meta of a frame also
+// has the tick and the s of the message it was rendered from.
 // Warm-up, from the DataChannel opening to startAtMs, always timed:
-// "reverse" sends viewpoints J, J-1, ..., 1 at startAtMs - tMs_j, so the
-// motion runs into viewpoint 0; "pose0" sends viewpoint 0 at the mean
-// viewpoint interval.
+// "reverse" sends viewpoints J, J-1, ..., 1 at startAtMs - tMs_j (push:
+// sets them at startAtMs - j * eventMs), so the motion runs into viewpoint
+// 0; "pose0" sends viewpoint 0 at the mean viewpoint interval (push: sets
+// it).
 //
 // Every saveEvery-th viewpoint's first frame is kept as I420 and goes to
 // Python through the tigasSaveYuv binding once playback is over: passing one
@@ -88,6 +95,7 @@
         const {
             signaling, modelId, camera, startAtMs, pacing = 'tms', warmup = 'reverse',
             closedTimeoutMs = 2000, tailMs = 1000, saveEvery = 12, statsMs = 100,
+            eventMs = 40, poseMs = 10,
             display = true, connectTimeoutMs = 8000, quiet = true,
         } = cfg;
         // client.py hands the events over beforehand (window.tigasEvents):
@@ -99,6 +107,7 @@
         const poses = [];          // one record per viewpoint of the run
         const warm = [];           // warm-up messages
         const metas = [];          // the sender's per-frame messages
+        const sends = [];          // push: [time, s, i] of every viewpoint message
         const decoded = [];        // every frame read from the track
         const shown = [];          // requestVideoFrameCallback records
         const rstats = [];         // getStats every statsMs
@@ -216,6 +225,7 @@
                 dec: rec.dec, rtp_ts: rec.rtp, recv: rec.recv, render_ms: meta.render_ms,
                 t_push: meta.t_push, t_meta: meta.t_meta, frame: rec.n, width: rec.w, height: rec.h,
             });
+            if (meta.s !== undefined) Object.assign(p, { s: meta.s, tick: meta.tick });
             if (meta.i % saveEvery === 0 && data) saveYuv(meta.i, rec.w, rec.h, data);
             const wake = waiters.get(meta.i);
             if (wake) { waiters.delete(meta.i); wake(true); }
@@ -343,20 +353,42 @@
         await dcOpen;
         const statsDone = pollStats().catch(e => console.error(`stats: ${e}`));
 
+        // --- push: the loop that sends the current viewpoint -----------------
+        const push = pacing === 'push';
+        let cur = null;            // {i, body}: the viewpoint the loop sends
+        let seq = 0;
+        let looping = push;
+        async function poseLoop() {
+            while (looping) {
+                if (cur) {
+                    const t = now();
+                    dc.send(`{"i":${cur.i},"s":${seq},"body":${cur.body}}`);
+                    sends.push([t, seq++, cur.i]);
+                }
+                await new Promise(r => setTimeout(r, poseMs));
+            }
+        }
+        const setPose = (i, j) => { cur = { i, body: JSON.stringify(bodyOf(events[j])) }; };
+        const loopDone = push ? poseLoop().catch(e => console.error(`pose loop: ${e}`)) : null;
+
         // --- warm-up --------------------------------------------------------
         function sendWarm(j) {
             const i = -1 - warm.length;
             warm.push({ i, j, send: now() });
-            dc.send(JSON.stringify({ i, body: bodyOf(events[j]) }));
+            if (push) setPose(i, j);
+            else dc.send(JSON.stringify({ i, body: bodyOf(events[j]) }));
         }
         if (warmup === 'reverse') {
+            const lead = j => (push ? j * eventMs : events[j].tMs);
             let J = 0;
             const t = now();
-            while (J + 1 < N && startAtMs - events[J + 1].tMs > t) J++;
+            while (J + 1 < N && startAtMs - lead(J + 1) > t) J++;
             for (let j = J; j >= 1; j--) {
-                await sleepUntil(startAtMs - events[j].tMs);
+                await sleepUntil(startAtMs - lead(j));
                 sendWarm(j);
             }
+        } else if (warmup === 'pose0' && push) {
+            sendWarm(0);
         } else if (warmup === 'pose0') {
             const dt = events[N - 1].tMs / (N - 1);
             for (let t = now(); t < startAtMs - dt / 2; t += dt) {
@@ -377,7 +409,23 @@
             waiters.set(i, resolve);
             setTimeout(() => { if (waiters.delete(i)) resolve(false); }, ms);
         });
-        if (pacing === 'tms') {
+        let end;
+        if (push) {
+            // as exp/runner_wt.js: set at start + i * eventMs, send = when set
+            for (let i = 0; i < N; i++) {
+                await sleepUntil(startAtMs + i * eventMs);
+                poses[i] = { i, due: startAtMs + i * eventMs, send: now() };
+                setPose(i, i);
+            }
+            await sleepUntil(startAtMs + N * eventMs);
+            end = now();
+            const deadline = end + tailMs;
+            while (now() < deadline && poses[N - 1].dec === undefined) {
+                await new Promise(r => setTimeout(r, 20));
+            }
+            looping = false;
+            await loopDone;
+        } else if (pacing === 'tms') {
             for (let i = 0; i < N; i++) {
                 await sleepUntil(startAtMs + events[i].tMs);
                 sendPose(i);
@@ -392,7 +440,7 @@
                 if (!(await waitFrame(i, closedTimeoutMs))) poses[i].error = 'timeout';
             }
         }
-        const end = now();
+        end ??= now();
 
         // --- close ----------------------------------------------------------
         for (const p of poses) if (p.dec === undefined && !p.error) p.error = 'no frame';
@@ -407,7 +455,7 @@
         if (gap(Infinity).length) fillGap(Infinity, await prevCopy());
         if (prev) prev.frame.close();
         await passSaves();
-        return { start, end, camera, times, poses, warm, metas, decoded, shown, rstats, standins,
+        return { start, end, camera, times, poses, warm, metas, sends, decoded, shown, rstats, standins,
                  pendingAtRead };
     };
 })();

@@ -62,6 +62,15 @@ frames/<i>.yuv the I420 of every 12th viewpoint. Such a viewpoint that got
 no frame has frames/<i>_standin.yuv instead, the frame on screen while its
 frame was due (exp/runner_webrtc.js), and standin_i in frames.ndjson: the
 viewpoint that frame belongs to (negative: a warm-up frame).
+--pacing push streams like --mode wt: viewpoint k is set at
+start + k * --event-ms, the page sends the current viewpoint every
+--pose-ms and tigas_sender (run with --push_fps) renders the latest one at
+a fixed rate. In frames.ndjson send and due are then the time viewpoint k
+was set and start + k * --event-ms, dec is its first frame read, s and tick
+that frame's message and push tick, msg the time that message was sent, and
+"error": "no frame" means no frame of it was read (as in --mode wt, a
+viewpoint can be skipped). webrtc_sends.json has every viewpoint message
+[time, s, viewpoint].
 """
 import argparse
 import base64
@@ -101,11 +110,11 @@ def main():
                     help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push; "
                     "webrtc: tigas_sender over WebRTC")
     ap.add_argument("--signaling-port", type=int, default=8888, help="--mode webrtc: peerconnection_server")
-    ap.add_argument("--pacing", choices=["tms", "closed"],
+    ap.add_argument("--pacing", choices=["tms", "closed", "push"],
                     help="tms sends viewpoint i at t0 + W + tMs_i (--mode player: skips the viewpoints "
                     "that came due while a request was out); closed sends the next one when the frame "
-                    "of the previous one has been read. Default: tms for --mode webrtc, closed for "
-                    "--mode player")
+                    "of the previous one has been read; push (--mode webrtc) streams like --mode wt. "
+                    "Default: tms for --mode webrtc, closed for --mode player")
     ap.add_argument("--warmup-mode", choices=["reverse", "pose0"], default="reverse",
                     help="--mode webrtc: what the page sends before t0 + W (exp/runner_webrtc.js)")
     ap.add_argument("--closed-timeout-ms", type=float, default=2000,
@@ -115,7 +124,10 @@ def main():
                     help="--mode webrtc: no <video> element, so no requestVideoFrameCallback times")
     ap.add_argument("--abr", choices=["simple", "l2a", "lol+", "throughput"],
                     help="required without --session; throughput (ThroughputABR) is the one of --mode wt")
-    ap.add_argument("--event-ms", type=float, default=40, help="--mode wt: one viewpoint every N ms")
+    ap.add_argument("--event-ms", type=float, default=40,
+                    help="--mode wt and --pacing push: one viewpoint every N ms")
+    ap.add_argument("--pose-ms", type=float, default=10,
+                    help="--pacing push: wait N ms after each viewpoint message, as /player-wt does")
     ap.add_argument("--tail-ms", type=float, default=1000,
                     help="--mode wt: keep recording frames N ms after the last viewpoint")
     ap.add_argument("--seed", type=int, default=1)
@@ -137,6 +149,8 @@ def main():
         ap.error("--mode wt has its own pacing (--event-ms)")
     if a.mode == "player" and a.session and a.pacing == "tms":
         ap.error("--pacing tms plays one run")
+    if a.pacing == "push" and a.mode != "webrtc":
+        ap.error("--pacing push is for --mode webrtc (--mode wt is the QUIC one)")
     if a.mode != "wt":
         a.pacing = a.pacing or ("tms" if a.mode == "webrtc" else "closed")
     if a.mode == "webrtc":
@@ -287,6 +301,8 @@ def main():
                     fh.write(json.dumps(dict(r, **{k: rel(r.get(k)) for k in keys if k in r})) + "\n")
 
         rtp_to_i = {m["rtp_ts"]: m["i"] for m in res["metas"]}
+        push = a.pacing == "push"
+        sent_at = {s: t for t, s, _ in res["sends"]}
         first_shown = {}
         for s in res["shown"]:
             first_shown.setdefault(s["rtp"], s)
@@ -302,7 +318,11 @@ def main():
                     p["recv"] = s["recv"]
             if p["i"] in standin:
                 p["standin_i"] = rtp_to_i.get(standin[p["i"]])
-        write("frames.ndjson", poses, ("send", "dec", "drawn", "shown", "recv", "t_push", "t_meta"))
+            if push and "s" in p:
+                p["msg"] = sent_at.get(p["s"])
+        write("frames.ndjson", poses, ("send", "due", "msg", "dec", "drawn", "shown", "recv", "t_push", "t_meta"))
+        if push:
+            json.dump([[rel(t), s, i] for t, s, i in res["sends"]], open(os.path.join(out, "webrtc_sends.json"), "w"))
         for f in res["decoded"]:
             f.setdefault("i", rtp_to_i.get(f["rtp"]))
         write("webrtc_frames.ndjson", res["decoded"], ("dec", "recv", "cap"))
@@ -329,13 +349,16 @@ def main():
                     "formats": sorted({f["fmt"] for f in decoded if f.get("fmt")}),
                     "messages": len(res["metas"]), "presented": len(res["shown"]),
                     "viewpoints_presented": sum("shown" in p for p in poses),
-                    "timeouts": sum(p.get("error") == "timeout" for p in poses)},
+                    "timeouts": sum(p.get("error") == "timeout" for p in poses),
+                    **({"event_ms": a.event_ms, "pose_ms": a.pose_ms, "sends": len(res["sends"])}
+                       if push else {})},
             page_errors=errors[-20:])
         save(run, out)
         print(f"client: webrtc {a.pacing} {len(got)}/{len(poses)} viewpoints decoded in "
               f"{(res['end'] - res['start']) / 1e3:.1f} s, {len(decoded)} frames read, "
               f"{run['webrtc']['warmup_decoded']}/{len(res['warm'])} warm-up", flush=True)
-        return len(got) == len(poses)
+        # push skips viewpoints by design, as --mode wt does
+        return bool(got) if push else len(got) == len(poses)
 
     errors, done = [], 0
     try:
@@ -372,6 +395,7 @@ def main():
                     "modelId": a.scene, "camera": camera, "startAtMs": (t0 + a.warmup) * 1e3,
                     "pacing": a.pacing, "warmup": a.warmup_mode, "closedTimeoutMs": a.closed_timeout_ms,
                     "tailMs": a.tail_ms, "saveEvery": a.save_every, "display": not a.no_display,
+                    "eventMs": a.event_ms, "poseMs": a.pose_ms,
                     "connectTimeoutMs": a.warmup * 1e3, "quiet": not a.verbose_console})
                 ok = finish_webrtc(res)
                 done = 1
