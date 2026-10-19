@@ -24,6 +24,11 @@ Tables can also restore one of the methods of the paper (the ablations of
 exp/ablate.toml); the run directories then get a suffix after the trace:
 - offsets_s = [...]: repetition k starts the Ghent trace at its second
   offsets_s[k-1] (make_traces.py --offset); suffix _phi;
+- trace_start_s = {trace = s, ...}: every repetition starts that trace at its
+  second s (make_traces.py --offset), to play one window of a long trace;
+  suffix _s<s>, none for a trace not listed. Also for transport webrtc.
+  A trace is traces/<name>.csv (Ghent) or traces/<name>.trace (mahimahi,
+  replayed per millisecond), as in exp/push_dips.toml;
 - sessions = {S1 = [abr order], ...}: each session plays reps runs of each
   ABR in that order in one page, under one rattan (client.py --session);
   suffix _<session>. A session is run, retried and kept as a whole;
@@ -73,7 +78,7 @@ import time
 import tomllib
 
 from common import REPO, find_runs, load_events, run_rel, trace_name, traj_name
-from make_traces import build, ghent_bps, tc_rates
+from make_traces import build, first_bps, tc_rates
 
 EXP = os.path.join(REPO, "exp")
 PORT = 4433
@@ -109,6 +114,9 @@ def plan_runs(cfg, only, rtts=None):
                                       or [(None, None)])
                  for rtt in t["rtt_ms"] if not rtts or rtt in rtts]
         offsets, shaper = t.get("offsets_s"), t.get("shaper", "rattan")
+        starts = t.get("trace_start_s", {})
+        if offsets and starts:
+            raise SystemExit(f"[{name}]: offsets_s and trace_start_s do not go together")
         reps = len(offsets) if offsets else t["reps"]
         webrtc = t.get("transport", "quic") == "webrtc"
         if webrtc and (offsets or t.get("sessions") or shaper != "rattan"):
@@ -129,15 +137,17 @@ def plan_runs(cfg, only, rtts=None):
         for unit in units:
             for k, ((scene, traj, trace, scale, rtt), abr, rep, sname) in enumerate(unit, 1):
                 n = lengths.setdefault(traj, len(load_events(traj)))
-                off = offsets[rep - 1] if offsets else 0
-                label = (trace_name(trace, scale) + ("_phi" if offsets else "")
+                off = offsets[rep - 1] if offsets else starts.get(trace, 0)
+                start = f"_s{off}" if starts and off else ""
+                label = (trace_name(trace, scale) + ("_phi" if offsets else start)
                          + (f"_{sname}" if sname else "") + ("_tclo" if shaper == "tc-lo" else ""))
                 r = {"exp": name, "mode": "webrtc" if webrtc else t.get("mode", "player"),
                      "event_ms": t.get("event_ms", 40), "push_fps": t.get("push_fps", 60),
                      "pacing": t.get("pacing"), "warmup_mode": t.get("warmup_mode", "reverse"),
                      "warmup_rate": "first" if first else None,
                      "scene": scene, "trajectory": traj, "trace": trace,
-                     "scale": scale, "trace_name": trace_name(trace, scale) + (f"_phi{off}" if off else ""),
+                     "scale": scale,
+                     "trace_name": trace_name(trace, scale) + (f"_phi{off}" if offsets and off else start),
                      "label": label, "offset_s": off, "shaper": shaper, "rtt_ms": rtt,
                      "abr": abr, "rep": rep, "seed": rep,
                      "session": sname, "session_index": k if sname else None,
@@ -197,7 +207,7 @@ def check_env(cfg, runs):
 
 
 def write_traces(cfg, out, runs):
-    """traces/<trace>_x<scale>[_phi<offset>].json for rattan, .rates for
+    """traces/<trace>_x<scale>[_phi<offset>|_s<start>].json for rattan, .rates for
     tc_lo_loop.sh; refuses to change a trace that finished runs used."""
     os.makedirs(os.path.join(out, "traces"), exist_ok=True)
     s, paths = cfg["server"], {}
@@ -210,7 +220,7 @@ def write_traces(cfg, out, runs):
             text = tc_rates(r["trace"], r["scale"], r["offset_s"])
         else:
             path = os.path.join(out, "traces", r["trace_file"] + ".json")
-            warmup_bps = (ghent_bps(r["trace"], r["scale"], r["offset_s"])[0] if r["warmup_rate"] == "first"
+            warmup_bps = (first_bps(r["trace"], r["scale"], r["offset_s"]) if r["warmup_rate"] == "first"
                           else 50_000_000)
             text = json.dumps(build(r["trace"], r["scale"], s["warmup_s"], warmup_bps=warmup_bps,
                                     total=s.get("trace_total_s", 3600), offset=r["offset_s"]),
