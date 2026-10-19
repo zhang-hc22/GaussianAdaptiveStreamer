@@ -1,0 +1,75 @@
+# Frame dropping in tigas_sender: the ghent_tms table of exp/webrtc.toml
+# (bus x8 and x1, RTT 20 ms, 9 repetitions) under four sender settings.
+#
+# base: the defaults; sparkrtc's frame-drop ban on, MAE and adaptive frame
+#   drop off.
+# mae: --enable_mae=true; on overuse x264 shrinks the VBV buffer to about one
+#   frame, so the next frames get smaller.
+# afd: --enable_adaptive_frame_drop=true; the ban is lifted while the
+#   congestion window pushback ratio is above 0.05, the RTT is at least
+#   150 ms or the overuse is above 1 (video/video_stream_encoder.cc).
+# drop: --disable_frame_drop=false; upstream WebRTC's frame dropping.
+#
+# The run paths do not show the setting, so each table has its own --out:
+#
+#   for t in base mae afd drop; do
+#     python exp/run_all.py --config exp/webrtc_drop.toml --only $t --out exp/results/webrtc-drop/$t
+#   done
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+[base]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[mae]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[afd]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_adaptive_frame_drop=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[drop]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--disable_frame_drop=false"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
