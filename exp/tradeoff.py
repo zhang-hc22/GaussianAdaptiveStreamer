@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Draws the quality-latency tradeoff figures (compare_tms.fig_tradeoff,
-against the mean, 90th and 99th pct. latency) from the runs.csv a
+"""Draws the tradeoff figures (compare_tms.fig_tradeoff: quality against the
+mean, 90th and 99th pct. latency and the stall share) from the runs.csv a
 comparison wrote, without its raw results:
 
   tms   exp/compare_tms.py         QUIC Latency, L2A, LoL+ and WebRTC, own frames
@@ -15,7 +15,7 @@ frames.ndjson under RESULTS (a run's results directory is looked up there by
 its part after "results/"), the way its comparison measures latency, and
 write them into RUNS_CSV. Only run.json and frames.ndjson are needed.
 --out defaults to the directory of RUNS_CSV; the figures are tradeoff.pdf,
-tradeoff_p90.pdf and tradeoff_p99.pdf (and PNGs).
+tradeoff_p90.pdf, tradeoff_p99.pdf and tradeoff_stall.pdf (and PNGs).
 """
 import argparse
 import os

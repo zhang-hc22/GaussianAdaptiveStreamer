@@ -42,7 +42,7 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import NullFormatter, ScalarFormatter  # noqa: E402
+from matplotlib.ticker import NullFormatter, PercentFormatter, ScalarFormatter  # noqa: E402
 
 from make_traces import segments  # noqa: E402
 from summarize import COLOR  # noqa: E402
@@ -254,50 +254,81 @@ def fig_columns(runs, path, metrics=COLUMNS):
     save(fig, path)
 
 
-TRADEOFFS = {"latency_ms": "", "latency_p90_ms": "_p90", "latency_p99_ms": "_p99"}   # column: file suffix
+TRADEOFFS = {"latency_ms": "", "latency_p90_ms": "_p90", "latency_p99_ms": "_p99",
+             "stall_share": "_stall"}   # column: file suffix
 
 
-def fig_tradeoff(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LABEL, color=COLOR, marker=None,
-                 quality=("psnr_own", "ssim_own", "vmaf_own"), names=METRICS, lat="latency_ms"):
-    """Quality against a run's latency (lat: mean, 90th or 99th pct.), one
-    row per trace, one column each for PSNR, SSIM and VMAF. The latency axis
-    falls from left to right, so the better side is up and to the right.
-    Small dots are the runs, the large marker with a black edge the mean of
-    the group's runs."""
-    marker = marker or {}
-    fig, axes = plt.subplots(len(traces), len(quality), figsize=(15, 3.6 * len(traces) + 0.6), sharex="row",
-                             squeeze=False)
-    for row, (trace, name) in zip(axes, traces.items()):
-        sel = runs[runs["trace"] == trace]
-        for ax, q in zip(row, quality):
-            for g in groups:
-                a = sel[sel[key] == g][[lat, q]].dropna()
-                if not len(a):
-                    continue
-                m = marker.get(g, "o")
-                ax.scatter(a[lat], a[q], s=DOT, color=color[g], marker=m, alpha=0.45, lw=0, zorder=3)
-                ax.scatter(a[lat].mean(), a[q].mean(), s=5 * DOT, color=color[g], marker=m,
-                           edgecolors="black", lw=0.8 * SCALE, zorder=4)
-            ax.set_ylabel(f"{name}\n{names[q]}" if q == quality[0] else names[q])
-            ax.grid(alpha=0.3)
-        x = sel[sel[key].isin(groups)][lat].dropna()
-        if not len(x):
-            continue
-        lo, hi = x.min(), x.max()
-        if hi / lo > 3:   # e.g. QUIC's backlog on the NYC traces
-            row[0].set_xscale("log")
-            row[0].set_xlim(lo / 1.15, hi * 1.15)
-            log_axis(row[0].xaxis, (20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000, 20000, 50000))
-        else:
-            pad = 0.08 * (hi - lo) + 1
-            row[0].set_xlim(lo - pad, hi + pad)
-        row[0].set_xlim(row[0].get_xlim()[::-1])   # latency falls to the right
-    for ax in axes[-1]:
-        ax.set_xlabel(names[lat])
+def tradeoff_row(row, sel, x, groups, key, color, marker, quality, names, name=None):
+    """Quality (one axis each) against x for the runs sel, x falling from
+    left to right. Small dots are the runs, the large marker with a black
+    edge the mean of the group's runs."""
+    for ax, q in zip(row, quality):
+        for g in groups:
+            a = sel[sel[key] == g][[x, q]].dropna()
+            if not len(a):
+                continue
+            m = marker.get(g, "o")
+            ax.scatter(a[x], a[q], s=DOT, color=color[g], marker=m, alpha=0.45, lw=0, zorder=3)
+            ax.scatter(a[x].mean(), a[q].mean(), s=5 * DOT, color=color[g], marker=m,
+                       edgecolors="black", lw=0.8 * SCALE, zorder=4)
+        ax.set_ylabel(f"{name}\n{names[q]}" if name and q == quality[0] else names[q])
+        ax.grid(alpha=0.3)
+    v = sel[sel[key].isin(groups)][x].dropna()
+    if not len(v):
+        return
+    lo, hi = v.min(), v.max()
+    if x in PERCENT:   # stall share, 0 in many runs
+        pad = 0.08 * (hi - lo) or 0.005
+        row[0].set_xlim(lo - pad, hi + pad)
+        row[0].xaxis.set_major_formatter(PercentFormatter(1.0))
+    elif hi / lo > 3:   # e.g. QUIC's backlog on the NYC traces
+        row[0].set_xscale("log")
+        row[0].set_xlim(lo / 1.15, hi * 1.15)
+        log_axis(row[0].xaxis, (20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000, 20000, 50000) if hi / lo < 50
+                 else (20, 50, 100, 200, 500, 1000, 5000, 20000, 50000))   # wide: labels would overlap
+    else:
+        pad = 0.08 * (hi - lo) + 1
+        row[0].set_xlim(lo - pad, hi + pad)
+    row[0].set_xlim(row[0].get_xlim()[::-1])   # the better side is on the right
+
+
+def tradeoff_legend(fig, runs, groups, key, label, color, marker):
     h = [Line2D([], [], color=color[g], marker=marker.get(g, "o"), markeredgecolor="black", lw=0, label=label[g])
          for g in groups if (runs[key] == g).any()]
     fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
+
+
+def fig_tradeoff(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LABEL, color=COLOR, marker=None,
+                 quality=("psnr_own", "ssim_own", "vmaf_own"), names=METRICS, lat="latency_ms"):
+    """Quality against a run's latency (lat: mean, 90th or 99th pct.) or
+    stall share, one row per trace with runs, one column each for PSNR,
+    SSIM and VMAF (tradeoff_row)."""
+    marker = marker or {}
+    traces = {t: n for t, n in traces.items() if (runs["trace"] == t).any()}
+    fig, axes = plt.subplots(len(traces), len(quality), figsize=(15, 3.6 * len(traces) + 0.6), sharex="row",
+                             squeeze=False)
+    for row, (trace, name) in zip(axes, traces.items()):
+        tradeoff_row(row, runs[runs["trace"] == trace], lat, groups, key, color, marker, quality, names, name)
+    for ax in axes[-1]:
+        ax.set_xlabel(names[lat])
+    tradeoff_legend(fig, runs, groups, key, label, color, marker)
+    save(fig, path)
+
+
+def fig_tradeoff_all(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LABEL, color=COLOR, marker=None,
+                     quality=("psnr_own", "ssim_own", "vmaf_own"), names=METRICS, xs=tuple(TRADEOFFS)):
+    """The runs of all traces together: quality against each of xs, one
+    row each; the large marker is the mean over every run of the group."""
+    marker = marker or {}
+    sel = runs[runs["trace"].isin(traces)]
+    fig, axes = plt.subplots(len(xs), len(quality), figsize=(15, 3.6 * len(xs) + 0.6), sharex="row",
+                             squeeze=False)
+    for row, x in zip(axes, xs):
+        tradeoff_row(row, sel, x, groups, key, color, marker, quality, names)
+        for ax in row:
+            ax.set_xlabel(names[x])
+    tradeoff_legend(fig, sel, groups, key, label, color, marker)
     save(fig, path)
 
 

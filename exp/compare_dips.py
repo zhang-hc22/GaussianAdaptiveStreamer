@@ -25,10 +25,14 @@ GCC's target is at 80 % of the second's trace bandwidth again, and until
 the screen age is below 200 ms again (nan if that did not happen before the
 next dip or the end of playback); target / trace in the 10 s after it.
 
-  python exp/compare_dips.py exp/results [--prefix dips-] [--out DIR]
+  python exp/compare_dips.py exp/results [--prefix dips- ...] [--traces T ...] [--out DIR]
 
-Reads <results>/<prefix><group> (_ in a group's name as -); writes runs.csv, dips.csv, tables.md and the
-figures (PDF and PNG) to --out (default <results>/dips-compare).
+Reads <results>/<prefix><group> (_ in a group's name as -) for each prefix,
+e.g. --prefix dips- nyc- for the traces of exp/push_nyc.toml too; --traces
+keeps only these (keys of TRACES, in this order). Writes runs.csv, dips.csv,
+tables.md and the figures (PDF and PNG) to --out (default
+<results>/dips-compare); tradeoff_all is the tradeoff of all traces
+together.
 """
 import argparse
 import json
@@ -44,11 +48,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 from compare_push import METRICS, PERCENT, TABLES, frames_drawn, measures, ndjson, run_dir, sent_rate  # noqa: E402
-from compare_tms import DOT, SCALE, TRADEOFFS, fig_tradeoff, log_axis, save, trace_steps  # noqa: E402
+from compare_tms import DOT, SCALE, TRADEOFFS, fig_tradeoff, fig_tradeoff_all, log_axis, save, trace_steps  # noqa: E402
 
 RTT = 20
 TRACES = {"bus_x8": "bus ×8", "train_x8_s147": "train ×8", "car_x8_s198": "car ×8",
-          "nyc-3109898-bus_x1_s370": "NYC 3109898", "nyc-3114405-bus_x1_s82": "NYC 3114405"}
+          "nyc-3109898-bus_x1_s370": "NYC 3109898", "nyc-3114405-bus_x1_s82": "NYC 3114405",
+          # exp/push_nyc.toml
+          "nyc-2925703-home1_x1_s143": "NYC 2925703", "nyc-3203600-timessquare_x1_s170": "NYC 3203600",
+          "nyc-3219061-home_x1_s851": "NYC 3219061", "nyc-3453943-timessquare_x1_s211": "NYC 3453943",
+          "nyc-3552192-bus_x1_s72": "NYC 3552192"}
 GROUPS = ["quic", "webrtc", "mae", "gcc", "gcc_mae"]
 LABEL = {"quic": "QUIC", "webrtc": "WebRTC", "mae": "WebRTC + MAE", "gcc": "WebRTC, GCC raised",
          "gcc_mae": "WebRTC + MAE, GCC raised"}
@@ -71,18 +79,19 @@ COLUMNS = ["psnr", "vmaf", "lpips", "latency_ms", "latency_p95_ms", "shown", "ag
 JITTER = np.random.default_rng(0)
 
 
-def load(root, prefix):
+def load(root, prefixes):
     out = []
-    for g in GROUPS:
-        res = os.path.join(root, prefix + g.replace("_", "-"))
-        path = os.path.join(res, "summary", "runs.csv")
-        if not os.path.exists(path):
-            print(f"compare_dips: no {path}, group {g} left out")
-            continue
-        runs = pd.read_csv(path)
-        runs = runs[(runs["rtt_ms"] == RTT) & runs["trace"].isin(TRACES)].copy()
-        runs["results"], runs["group"] = res, g
-        out.append(runs)
+    for prefix in prefixes:
+        for g in GROUPS:
+            res = os.path.join(root, prefix + g.replace("_", "-"))
+            path = os.path.join(res, "summary", "runs.csv")
+            if not os.path.exists(path):
+                print(f"compare_dips: no {path}, group {g} left out")
+                continue
+            runs = pd.read_csv(path)
+            runs = runs[(runs["rtt_ms"] == RTT) & runs["trace"].isin(TRACES)].copy()
+            runs["results"], runs["group"] = res, g
+            out.append(runs)
     return pd.concat(out, ignore_index=True)
 
 
@@ -293,11 +302,17 @@ def style(g):
 
 def fig_cdf(lat, path):
     """Top row latency of the viewpoints shown, bottom row screen age over
-    playback time; one column per trace. No title or legend (colors as
-    COLOR, QUIC dashed)."""
-    fig, axes = plt.subplots(2, len(TRACES), figsize=(4.6 * len(TRACES), 7), sharey=True)
-    for row, kind in enumerate(["latency", "age"]):
-        for ax, (trace, name) in zip(axes[row], TRACES.items()):
+    playback time; one column per trace, at most five per pair of rows. No
+    title or legend (colors as COLOR, QUIC dashed)."""
+    n = min(5, len(TRACES))   # traces per row pair
+    k = -(-len(TRACES) // n)
+    fig, axes = plt.subplots(2 * k, n, figsize=(4.6 * n, 7 * k), sharey=True, squeeze=False)
+    for j in range(len(TRACES) - n * (k - 1), n):   # empty places in the last pair of rows
+        axes[-2, j].axis("off")
+        axes[-1, j].axis("off")
+    for i, (trace, name) in enumerate(TRACES.items()):
+        for row, kind in enumerate(["latency", "age"]):
+            ax = axes[2 * (i // n) + row, i % n]
             for g in GROUPS:
                 v = lat[(lat["trace"] == trace) & (lat["group"] == g) & (lat["kind"] == kind)]["ms"]
                 v = np.sort(v.dropna().to_numpy())
@@ -307,7 +322,8 @@ def fig_cdf(lat, path):
             ax.set_xlim(left=20)
             log_axis(ax.xaxis, (20, 50, 200, 1000, 5000, 20000))   # sparse: QUIC reaches 37 s
             ax.set_xlabel(f"{name}: {'latency' if kind == 'latency' else 'screen age'} (ms)")
-        axes[row, 0].set_ylabel("CDF")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("CDF")
     fig.tight_layout()
     save(fig, path)
 
@@ -399,14 +415,18 @@ def fig_timeseries(runs, trace, path, rep=1):
 
 
 def main():
+    global TRACES
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("results", help="the directory with <prefix><group>")
-    ap.add_argument("--prefix", default="dips-")
+    ap.add_argument("--prefix", nargs="+", default=["dips-"])
+    ap.add_argument("--traces", nargs="+", choices=list(TRACES), metavar="TRACE")
     ap.add_argument("--out")
     a = ap.parse_args()
     out = a.out or os.path.join(a.results, "dips-compare")
     os.makedirs(out, exist_ok=True)
+    TRACES = {t: TRACES[t] for t in a.traces or TRACES}
     runs = load(os.path.abspath(a.results), a.prefix)
+    TRACES = {t: n for t, n in TRACES.items() if (runs["trace"] == t).any()}
     runs.loc[runs["group"] != "quic", "profile_mean"] = np.nan   # always full size
     runs, lat, dip = extend(runs)
     runs.to_csv(os.path.join(out, "runs.csv"), index=False)
@@ -420,6 +440,8 @@ def main():
     for lat, suffix in TRADEOFFS.items():
         fig_tradeoff(runs, os.path.join(out, f"tradeoff{suffix}.pdf"), TRACES, GROUPS, "group", LABEL, COLOR,
                      MARKER, ("psnr", "ssim", "vmaf"), METRICS, lat)
+    fig_tradeoff_all(runs, os.path.join(out, "tradeoff_all.pdf"), TRACES, GROUPS, "group", LABEL, COLOR, MARKER,
+                     ("psnr", "ssim", "vmaf"), METRICS)
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_dips: {len(runs)} runs, {len(dip)} dips, output in {out}")
 
