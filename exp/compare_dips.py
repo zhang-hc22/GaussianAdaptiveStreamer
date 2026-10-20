@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Compares the push modes under deep dips of the bandwidth
 (exp/push_dips.toml): QUIC (/player-wt) and WebRTC push, with and without
-MAE, with GCC as upstream and with its increase raised (--gcc_ai=4
---gcc_mi=1.16). Five traces, RTT 20 ms, 1280x720, 3 repetitions.
+MAE, with GCC as upstream, with its increase raised (--gcc_ai=4
+--gcc_mi=1.16) and tuned by Mortise (--enable_mortise=true,
+exp/push_mortise.toml). Five traces, RTT 20 ms, 1280x720, 3 repetitions.
 
 Per run, the measures of exp/compare_push.py, and with the seconds of
 playback split by their trace bandwidth: below 0.35 Mbit/s (the WebRTC
@@ -24,6 +25,8 @@ trace). After each dip (a run of seconds below 0.35 Mbit/s): the time until
 GCC's target is at 80 % of the second's trace bandwidth again, and until
 the screen age is below 200 ms again (nan if that did not happen before the
 next dip or the end of playback); target / trace in the 10 s after it.
+The video-call QoE of each run (exp/qoe.py), and for the Mortise groups the
+summary of its trade-off u (exp/mortise_log.py).
 
   python exp/compare_dips.py exp/results [--prefix dips- ...] [--traces T ...] [--out DIR]
 
@@ -32,7 +35,9 @@ e.g. --prefix dips- nyc- for the traces of exp/push_nyc.toml too; --traces
 keeps only these (keys of TRACES, in this order). Writes runs.csv, dips.csv,
 tables.md and the figures (PDF and PNG) to --out (default
 <results>/dips-compare); tradeoff_all is the tradeoff of all traces
-together.
+together, qoe and qoe_all the QoE per trace and of all traces, and
+mortise_timeseries_<trace> GCC's target, Mortise's u and the screen age of
+one repetition.
 """
 import argparse
 import json
@@ -49,6 +54,8 @@ from matplotlib.lines import Line2D  # noqa: E402
 
 from compare_push import METRICS, PERCENT, TABLES, frames_drawn, measures, ndjson, run_dir, sent_rate  # noqa: E402
 from compare_tms import DOT, SCALE, TRADEOFFS, fig_tradeoff, fig_tradeoff_all, log_axis, save, trace_steps  # noqa: E402
+from mortise_log import series as mortise_series, summary as mortise_summary  # noqa: E402
+from qoe import QOE, add_qoe  # noqa: E402
 
 RTT = 20
 TRACES = {"bus_x8": "bus ×8", "train_x8_s147": "train ×8", "car_x8_s198": "car ×8",
@@ -57,11 +64,12 @@ TRACES = {"bus_x8": "bus ×8", "train_x8_s147": "train ×8", "car_x8_s198": "car
           "nyc-2925703-home1_x1_s143": "NYC 2925703", "nyc-3203600-timessquare_x1_s170": "NYC 3203600",
           "nyc-3219061-home_x1_s851": "NYC 3219061", "nyc-3453943-timessquare_x1_s211": "NYC 3453943",
           "nyc-3552192-bus_x1_s72": "NYC 3552192"}
-GROUPS = ["quic", "webrtc", "mae", "gcc", "gcc_mae"]
+GROUPS = ["quic", "webrtc", "mae", "gcc", "gcc_mae", "mortise", "mortise_mae"]
 LABEL = {"quic": "QUIC", "webrtc": "WebRTC", "mae": "WebRTC + MAE", "gcc": "WebRTC, GCC raised",
-         "gcc_mae": "WebRTC + MAE, GCC raised"}
-COLOR = {"quic": "#e7298a", "webrtc": "#1b9e77", "mae": "#7570b3", "gcc": "#d95f02", "gcc_mae": "#e6ab02"}
-MARKER = {"quic": "o", "webrtc": "D", "mae": "s", "gcc": "^", "gcc_mae": "v"}
+         "gcc_mae": "WebRTC + MAE, GCC raised", "mortise": "WebRTC, Mortise", "mortise_mae": "WebRTC + MAE, Mortise"}
+COLOR = {"quic": "#e7298a", "webrtc": "#1b9e77", "mae": "#7570b3", "gcc": "#d95f02", "gcc_mae": "#e6ab02",
+         "mortise": "#66a61e", "mortise_mae": "#a6761d"}
+MARKER = {"quic": "o", "webrtc": "D", "mae": "s", "gcc": "^", "gcc_mae": "v", "mortise": "P", "mortise_mae": "X"}
 FLOOR_WEBRTC, FLOOR_QUIC = 0.35, 1.45   # Mbit/s
 CLASSES = {"low": f"< {FLOOR_WEBRTC} Mbit/s", "mid": f"{FLOOR_WEBRTC}–{FLOOR_QUIC} Mbit/s",
            "high": f"> {FLOOR_QUIC} Mbit/s"}
@@ -72,8 +80,19 @@ METRICS = {**METRICS, "target_ratio": "target / trace", "low_target_secs": "s wi
            "low_target_qp51": "their QP 51 frames", "low_target_qp": "their mean QP", "dips": "dips",
            "target_after10": "target / trace, 10 s after", "target_rec_s": "target back to 0.8 trace (s)",
            "target_rec_max_s": "max (s)", "target_unrec": "not back", "age_rec_s": "screen age back < 200 ms (s)",
-           "age_rec_max_s": "max (s)", "age_unrec": "not back"}
-PERCENT = PERCENT | {"age_gt200", "qp51", "p3", "low_target_qp51", "target_unrec", "age_unrec"}
+           "age_rec_max_s": "max (s)", "age_unrec": "not back", **QOE,
+           "mortise_u": "mean u", "mortise_u_le05": "u <= 0.5", "mortise_u_ge09": "u >= 0.9",
+           "mortise_alpha": "mean MI / s", "mortise_beta": "mean back-off", "mortise_ai": "mean AI scale",
+           "mortise_cp_min": "change points / min", "mortise_changes_min": "u changes / min",
+           "mortise_rule_share": "rule periods", "mortise_cp_share": "change-point periods",
+           "mortise_skip_share": "skipped periods", "mortise_rtt_ms": "median R (ms)",
+           "mortise_covered": "time with u"}
+PERCENT = PERCENT | {"age_gt200", "qp51", "p3", "low_target_qp51", "target_unrec", "age_unrec", "mortise_u_le05",
+                     "mortise_u_ge09", "mortise_rule_share", "mortise_cp_share", "mortise_skip_share",
+                     "mortise_covered"}
+MORTISE = ["mortise_u", "mortise_u_le05", "mortise_u_ge09", "mortise_alpha", "mortise_beta", "mortise_ai",
+           "mortise_cp_min", "mortise_changes_min", "mortise_rule_share", "mortise_cp_share", "mortise_skip_share",
+           "mortise_rtt_ms", "mortise_covered"]
 COLUMNS = ["psnr", "vmaf", "lpips", "latency_ms", "latency_p95_ms", "shown", "age_gt200", "stall_share",
            "bandwidth_mbps"]
 JITTER = np.random.default_rng(0)
@@ -231,7 +250,8 @@ def extend(runs):
         q = pd.read_csv(path) if os.path.exists(path) else None
         x, l, age = measures(d, run, q)
         y, dr = dips(r, d, run)
-        rows.append({**x, **y})
+        z = mortise_summary(d, run) if r.group != "quic" else {}
+        rows.append({**x, **y, **z})
         dip_rows += dr
         for kind, v in (("latency", l), ("age", age)):
             lat.append(pd.DataFrame({"trace": r.trace, "group": r.group, "rep": r.rep, "kind": kind, "ms": v}))
@@ -252,7 +272,7 @@ def extend(runs):
         runs = runs.merge(per, on=["group", "trace", "rep"], how="left")
         quic = runs["group"] == "quic"
         runs.loc[quic, ["target_after10", "target_rec_s", "target_rec_max_s", "target_unrec"]] = np.nan
-    return runs, pd.concat(lat, ignore_index=True), dip
+    return add_qoe(runs), pd.concat(lat, ignore_index=True), dip
 
 
 # ---- tables
@@ -289,7 +309,12 @@ def tables(runs):
     cols = ["target_ratio", "low_target_secs", "low_target_qp51", "low_target_qp", "dips", "target_after10",
             "target_rec_s", "target_rec_max_s", "target_unrec", "age_rec_s", "age_rec_max_s", "age_unrec"]
     out += ["### GCC and the recovery after a dip", ""] + table(runs, cols, [METRICS[m] for m in cols])
-    cols = ["latency_ms", "latency_p95_ms", "age_gt200", "psnr", "bandwidth_mbps"]
+    out += ["### video-call QoE (exp/qoe.py)", ""] + table(runs, list(QOE), list(QOE.values()))
+    if any(m in runs for m in MORTISE):
+        cols = [m for m in MORTISE if m in runs]
+        out += ["### Mortise's trade-off u (exp/mortise_log.py)", ""] + table(
+            runs[runs["group"].str.startswith("mortise")], cols, [METRICS[m] for m in cols])
+    cols = ["latency_ms", "latency_p95_ms", "age_gt200", "psnr", "bandwidth_mbps", "qoe"]
     out += ["### standard deviation over the repetitions", ""] + table(runs, cols, [METRICS[m] for m in cols], "std")
     return "\n".join(out) + "\n"
 
@@ -366,11 +391,12 @@ def fig_timeseries(runs, trace, path, rep=1):
     fig, axes = plt.subplots(4, 1, figsize=(15, 11), sharex=True)
     end = 88
     bins = np.arange(0, end + 1, 1.0)
-    drawn_trace = False
+    drawn_trace, groups = False, []
     for g in GROUPS:
         r = runs[(runs["trace"] == trace) & (runs["group"] == g) & (runs["rep"] == rep)]
         if not len(r):
             continue
+        groups.append(g)
         r = next(r.itertuples())
         d = run_dir(r.results, r)
         run = json.load(open(os.path.join(d, "run.json")))
@@ -407,8 +433,119 @@ def fig_timeseries(runs, trace, path, rep=1):
     axes[3].set_ylim(0, 52)
     axes[3].set_xlabel("time (s)")
     axes[3].set_xlim(0, end)
-    h = [Line2D([], [], label=LABEL[g], **style(g)) for g in GROUPS] + [Line2D([], [], color="black",
+    h = [Line2D([], [], label=LABEL[g], **style(g)) for g in groups] + [Line2D([], [], color="black",
                                                                               label="trace")]
+    fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    save(fig, path)
+
+
+MIN_SPAN = 4   # QoE points on a panel's y axis
+
+
+def qoe_panel(ax, runs, m, groups):
+    """One dot per run of each group, black bar = mean."""
+    for j, g in enumerate(groups):
+        v = runs[runs["group"] == g][m].dropna()
+        ax.scatter(j + (JITTER.random(len(v)) - 0.5) * 0.4, v, s=DOT, color=COLOR[g], marker=MARKER[g], zorder=3)
+        if len(v):
+            ax.hlines(v.mean(), j - 0.4, j + 0.4, color="black", lw=1.2 * SCALE, zorder=4)
+    ax.set_xticks([])
+    ax.set_xlim(-0.6, len(groups) - 0.4)
+    lo, hi = ax.get_ylim()
+    if hi - lo < MIN_SPAN:   # keep 99.95 against 100 from looking far apart
+        mid = (lo + hi) / 2
+        ax.set_ylim(mid - MIN_SPAN / 2, mid + MIN_SPAN / 2)
+    ax.grid(axis="y", alpha=0.3)
+
+
+def qoe_legend(fig, groups):
+    h = [Line2D([], [], color=COLOR[g], marker=MARKER[g], lw=0, label=LABEL[g]) for g in groups]
+    fig.legend(handles=h, loc="upper center", ncol=min(len(h), 4), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 1 - (0.5 if len(h) <= 4 else 0.9) / fig.get_figheight()))
+
+
+def fig_qoe(runs, path):
+    """The QoE and its three parts (exp/qoe.py), one row per trace, the
+    groups side by side."""
+    groups = [g for g in GROUPS if (runs["group"] == g).any()]
+    fig, axes = plt.subplots(len(TRACES), len(QOE), figsize=(15, 2.6 * len(TRACES) + 0.9), squeeze=False)
+    for row, (trace, name) in zip(axes, TRACES.items()):
+        for ax, m in zip(row, QOE):
+            qoe_panel(ax, runs[runs["trace"] == trace], m, groups)
+        row[0].set_ylabel(f"{name}\n{QOE['qoe']}")
+    for ax, m in zip(axes[0], QOE):
+        ax.set_title(QOE[m])
+    qoe_legend(fig, groups)
+    save(fig, path)
+
+
+def fig_qoe_all(runs, path):
+    """fig_qoe with the runs of all traces together."""
+    groups = [g for g in GROUPS if (runs["group"] == g).any()]
+    fig, axes = plt.subplots(1, len(QOE), figsize=(15, 4.4))
+    for ax, m in zip(axes, QOE):
+        qoe_panel(ax, runs, m, groups)
+        ax.set_title(QOE[m])
+    qoe_legend(fig, groups)
+    save(fig, path)
+
+
+TS_GROUPS = ["webrtc", "gcc", "mortise"]
+
+
+def fig_mortise_timeseries(runs, trace, path, rep=1):
+    """One repetition of one trace: the trace bandwidth per second (black)
+    and GCC's target of WebRTC, GCC raised and Mortise; Mortise's u (the
+    multiplicative increase a(u) on the right, u_min dotted, change points
+    as ticks at the top); the screen age."""
+    fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
+    end = 88
+    bins = np.arange(0, end + 1, 1.0)
+    drawn_trace, groups = False, []
+    for g in TS_GROUPS:
+        r = runs[(runs["trace"] == trace) & (runs["group"] == g) & (runs["rep"] == rep)]
+        if not len(r):
+            continue
+        groups.append(g)
+        r = next(r.itertuples())
+        d = run_dir(r.results, r)
+        run = json.load(open(os.path.join(d, "run.json")))
+        w0 = run["start_ms"]
+        if not drawn_trace:
+            ts, bw = trace_steps(r.results, run, trace, w0)
+            axes[0].stairs(bin_mean(ts, bw, bins), bins, baseline=None, color="black", lw=1.0 * SCALE)
+            drawn_trace = True
+        tt, tg = target_series(d, run, w0)
+        axes[0].plot(tt, tg, lw=0.8 * SCALE, **style(g))
+        ta, age = age_series(ndjson(os.path.join(d, "frames.ndjson")), frames_drawn(d, run), w0, run["end_ms"])
+        axes[2].plot(ta[::10], age[::10], lw=0.8 * SCALE, **style(g))
+        if g == "mortise":
+            log = mortise_series(d, run)
+            if len(log):
+                t = np.append(log["t"].to_numpy(), end)
+                axes[1].stairs(log["u"].to_numpy(), t, baseline=None, lw=1.0 * SCALE, **style(g))
+                p = log[log["u_min"].notna()] if "u_min" in log else log.iloc[:0]
+                axes[1].plot(p["t"], p["u_min"], ls="", marker=".", ms=3 * SCALE, color="0.4")
+                cp = log[log["branch"] == "cp_enter"]["t"]
+                axes[1].plot(cp, np.full(len(cp), 1.04), ls="", marker="|", ms=6 * SCALE, color="black")
+    axes[0].set_yscale("log")
+    axes[0].set_ylim(0.05, None)
+    axes[0].axhline(FLOOR_WEBRTC, color="0.5", lw=0.8, ls=":")
+    axes[0].set_ylabel("GCC target (Mbit/s)")
+    axes[1].set_ylim(0, 1.08)
+    axes[1].set_ylabel("Mortise u")
+    right = axes[1].secondary_yaxis("right", functions=(lambda u: 1.01 + 0.3 * (1 - u),
+                                                        lambda a: 1 - (a - 1.01) / 0.3))
+    right.set_ylabel("MI per second")
+    axes[2].set_yscale("log")
+    axes[2].set_ylim(20, None)
+    log_axis(axes[2].yaxis, (20, 50, 100, 200, 500, 1000, 5000, 20000))
+    axes[2].set_ylabel("screen age (ms)")
+    axes[2].set_xlabel("time (s)")
+    axes[2].set_xlim(0, end)
+    h = [Line2D([], [], label=LABEL[g], **style(g)) for g in groups] + [
+        Line2D([], [], color="black", label="trace"), Line2D([], [], color="0.4", ls="", marker=".", label="u_min")]
     fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     save(fig, path)
@@ -442,6 +579,11 @@ def main():
                      MARKER, ("psnr", "ssim", "vmaf"), METRICS, lat)
     fig_tradeoff_all(runs, os.path.join(out, "tradeoff_all.pdf"), TRACES, GROUPS, "group", LABEL, COLOR, MARKER,
                      ("psnr", "ssim", "vmaf"), METRICS)
+    fig_qoe(runs, os.path.join(out, "qoe.pdf"))
+    fig_qoe_all(runs, os.path.join(out, "qoe_all.pdf"))
+    if (runs["group"] == "mortise").any():
+        for trace in TRACES:
+            fig_mortise_timeseries(runs, trace, os.path.join(out, f"mortise_timeseries_{trace}.pdf"))
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_dips: {len(runs)} runs, {len(dip)} dips, output in {out}")
 
