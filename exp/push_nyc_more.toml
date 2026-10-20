@@ -1,0 +1,82 @@
+# Five unused NYC traces; seed 20261021. See work/figs/tigas-push-nyc-more/selection.json.
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+[quic]
+mode = "wt"
+abrs = ["throughput"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2767958-taxi1", "nyc-3093662-home3", "nyc-3201711-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare"]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 3, nyc-3093662-home3 = 9, nyc-3201711-timessquare = 8, nyc-3205967-timessquare = 147, nyc-3207521-timessquare = 131}
+rtt_ms = [20]
+reps = 3
+
+[webrtc]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2767958-taxi1", "nyc-3093662-home3", "nyc-3201711-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare"]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 3, nyc-3093662-home3 = 9, nyc-3201711-timessquare = 8, nyc-3205967-timessquare = 147, nyc-3207521-timessquare = 131}
+rtt_ms = [20]
+reps = 3
+
+[mae]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2767958-taxi1", "nyc-3093662-home3", "nyc-3201711-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare"]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 3, nyc-3093662-home3 = 9, nyc-3201711-timessquare = 8, nyc-3205967-timessquare = 147, nyc-3207521-timessquare = 131}
+rtt_ms = [20]
+reps = 3
+
+[mortise]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2767958-taxi1", "nyc-3093662-home3", "nyc-3201711-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare"]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 3, nyc-3093662-home3 = 9, nyc-3201711-timessquare = 8, nyc-3205967-timessquare = 147, nyc-3207521-timessquare = 131}
+rtt_ms = [20]
+reps = 3
+
+[mortise_mae]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true", "--enable_mae=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2767958-taxi1", "nyc-3093662-home3", "nyc-3201711-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare"]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 3, nyc-3093662-home3 = 9, nyc-3201711-timessquare = 8, nyc-3205967-timessquare = 147, nyc-3207521-timessquare = 131}
+rtt_ms = [20]
+reps = 3

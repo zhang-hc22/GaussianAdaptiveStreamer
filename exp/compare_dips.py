@@ -492,7 +492,7 @@ def fig_qoe_all(runs, path):
     save(fig, path)
 
 
-TS_GROUPS = ["webrtc", "gcc", "mortise"]
+TS_GROUPS = ["webrtc", "mae", "gcc", "gcc_mae", "mortise", "mortise_mae"]
 
 
 def fig_mortise_timeseries(runs, trace, path, rep=1):
@@ -505,6 +505,8 @@ def fig_mortise_timeseries(runs, trace, path, rep=1):
     bins = np.arange(0, end + 1, 1.0)
     drawn_trace, groups = False, []
     for g in TS_GROUPS:
+        if g not in GROUPS:
+            continue
         r = runs[(runs["trace"] == trace) & (runs["group"] == g) & (runs["rep"] == rep)]
         if not len(r):
             continue
@@ -521,7 +523,7 @@ def fig_mortise_timeseries(runs, trace, path, rep=1):
         axes[0].plot(tt, tg, lw=0.8 * SCALE, **style(g))
         ta, age = age_series(ndjson(os.path.join(d, "frames.ndjson")), frames_drawn(d, run), w0, run["end_ms"])
         axes[2].plot(ta[::10], age[::10], lw=0.8 * SCALE, **style(g))
-        if g == "mortise":
+        if g in ("mortise", "mortise_mae"):
             log = mortise_series(d, run)
             if len(log):
                 t = np.append(log["t"].to_numpy(), end)
@@ -547,22 +549,24 @@ def fig_mortise_timeseries(runs, trace, path, rep=1):
     axes[2].set_xlim(0, end)
     h = [Line2D([], [], label=LABEL[g], **style(g)) for g in groups] + [
         Line2D([], [], color="black", label="trace"), Line2D([], [], color="0.4", ls="", marker=".", label="u_min")]
-    fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.legend(handles=h, loc="upper center", ncol=min(len(h), 4), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     save(fig, path)
 
 
 def main():
-    global TRACES
+    global TRACES, GROUPS
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("results", help="the directory with <prefix><group>")
     ap.add_argument("--prefix", nargs="+", default=["dips-"])
-    ap.add_argument("--traces", nargs="+", choices=list(TRACES), metavar="TRACE")
+    ap.add_argument("--traces", nargs="+", metavar="TRACE")
+    ap.add_argument("--groups", nargs="+", choices=GROUPS, help="read and plot only these groups")
     ap.add_argument("--out")
     a = ap.parse_args()
     out = a.out or os.path.join(a.results, "dips-compare")
     os.makedirs(out, exist_ok=True)
-    TRACES = {t: TRACES[t] for t in a.traces or TRACES}
+    GROUPS = a.groups or GROUPS
+    TRACES = {t: TRACES.get(t, t.split("_x")[0].replace("nyc-", "NYC ")) for t in a.traces or TRACES}
     runs = load(os.path.abspath(a.results), a.prefix)
     TRACES = {t: n for t, n in TRACES.items() if (runs["trace"] == t).any()}
     runs.loc[runs["group"] != "quic", "profile_mean"] = np.nan   # always full size
