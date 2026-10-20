@@ -306,8 +306,9 @@ def tradeoff_row(row, sel, x, groups, key, color, marker, quality, names, name=N
 def tradeoff_legend(fig, runs, groups, key, label, color, marker):
     h = [Line2D([], [], color=color[g], marker=marker.get(g, "o"), markeredgecolor="black", lw=0, label=label[g])
          for g in groups if (runs[key] == g).any()]
-    fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
-    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 / fig.get_figheight()))
+    rows = 1 if len(h) <= 5 else 2   # seven groups do not fit in one row
+    fig.legend(handles=h, loc="upper center", ncol=-(-len(h) // rows), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.5 * rows / fig.get_figheight()))
 
 
 def fig_tradeoff(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LABEL, color=COLOR, marker=None,

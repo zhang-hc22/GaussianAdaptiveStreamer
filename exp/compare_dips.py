@@ -435,8 +435,9 @@ def fig_timeseries(runs, trace, path, rep=1):
     axes[3].set_xlim(0, end)
     h = [Line2D([], [], label=LABEL[g], **style(g)) for g in groups] + [Line2D([], [], color="black",
                                                                               label="trace")]
-    fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    rows = 1 if len(h) <= 6 else 2   # seven groups and the trace do not fit in one row
+    fig.legend(handles=h, loc="upper center", ncol=-(-len(h) // rows), frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.03 * rows))
     save(fig, path)
 
 
