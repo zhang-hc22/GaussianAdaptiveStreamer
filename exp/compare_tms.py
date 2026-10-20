@@ -42,7 +42,7 @@ import pandas as pd
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import NullFormatter, PercentFormatter, ScalarFormatter  # noqa: E402
+from matplotlib.ticker import FuncFormatter, NullFormatter, ScalarFormatter  # noqa: E402
 
 from make_traces import segments  # noqa: E402
 from summarize import COLOR  # noqa: E402
@@ -278,9 +278,10 @@ def tradeoff_row(row, sel, x, groups, key, color, marker, quality, names, name=N
         return
     lo, hi = v.min(), v.max()
     if x in PERCENT:   # stall share, 0 in many runs
-        pad = 0.08 * (hi - lo) or 0.005
+        hi = max(hi, 0.01)   # no run stalled: 0 to 1 %
+        pad = 0.05 * (hi - lo)
         row[0].set_xlim(lo - pad, hi + pad)
-        row[0].xaxis.set_major_formatter(PercentFormatter(1.0))
+        row[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{100 * v + 0:g}%"))
     elif hi / lo > 3:   # e.g. QUIC's backlog on the NYC traces
         row[0].set_xscale("log")
         row[0].set_xlim(lo / 1.15, hi * 1.15)
