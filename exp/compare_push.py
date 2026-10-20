@@ -50,7 +50,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from matplotlib.lines import Line2D  # noqa: E402
 
-from compare_tms import DOT, SCALE, log_axis, save, trace_steps  # noqa: E402
+from compare_tms import DOT, SCALE, fig_tradeoff, log_axis, save, trace_steps  # noqa: E402
 from summarize import COLOR  # noqa: E402
 
 RTT = 20
@@ -347,6 +347,8 @@ def main():
     fig_cdf(lat, os.path.join(out, "latency_cdf.pdf"))
     fig_columns(runs, os.path.join(out, "columns.pdf"))
     fig_timeseries(runs, os.path.join(out, "timeseries.pdf"))
+    fig_tradeoff(runs, os.path.join(out, "tradeoff.pdf"), TRACES, SCHEMES, "abr", LABEL, COLOR,
+                 {"webrtc-push": "D"}, ("psnr", "ssim", "vmaf"), METRICS)
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_push: {len(runs)} runs, output in {out}")
 

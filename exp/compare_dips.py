@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
 from compare_push import METRICS, PERCENT, TABLES, frames_drawn, measures, ndjson, run_dir, sent_rate  # noqa: E402
-from compare_tms import DOT, SCALE, log_axis, save, trace_steps  # noqa: E402
+from compare_tms import DOT, SCALE, fig_tradeoff, log_axis, save, trace_steps  # noqa: E402
 
 RTT = 20
 TRACES = {"bus_x8": "bus ×8", "train_x8_s147": "train ×8", "car_x8_s198": "car ×8",
@@ -417,6 +417,8 @@ def main():
     for trace in TRACES:
         if (runs["trace"] == trace).any():
             fig_timeseries(runs, trace, os.path.join(out, f"timeseries_{trace}.pdf"))
+    fig_tradeoff(runs, os.path.join(out, "tradeoff.pdf"), TRACES, GROUPS, "group", LABEL, COLOR, MARKER,
+                 ("psnr", "ssim", "vmaf"), METRICS)
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_dips: {len(runs)} runs, {len(dip)} dips, output in {out}")
 
