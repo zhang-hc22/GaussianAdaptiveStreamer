@@ -199,6 +199,17 @@ def log_axis(axis, ticks=(20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000)):
     axis.set_minor_formatter(NullFormatter())
 
 
+def log_ticks(lo, hi):
+    """The densest of the 1-2-3-5, 1-2-5, 1-3 and 1 tick sets in [lo, hi] whose
+    neighbouring labels stay apart: about 3 % of a tradeoff panel per digit."""
+    span = np.log10(hi / lo)
+    for m in ((1, 2, 3, 5), (1, 2, 5), (1, 3), (1,)):
+        ticks = [k * 10 ** e for e in range(1, 6) for k in m if lo <= k * 10 ** e <= hi]
+        if all(np.log10(b / a) / span >= 0.015 * (len(str(a)) + len(str(b))) + 0.03 for a, b in zip(ticks, ticks[1:])):
+            break
+    return ticks
+
+
 def save(fig, path):
     fig.savefig(path)
     fig.savefig(os.path.splitext(path)[0] + ".png", dpi=150)
@@ -285,8 +296,7 @@ def tradeoff_row(row, sel, x, groups, key, color, marker, quality, names, name=N
     elif hi / lo > 3:   # e.g. QUIC's backlog on the NYC traces
         row[0].set_xscale("log")
         row[0].set_xlim(lo / 1.15, hi * 1.15)
-        log_axis(row[0].xaxis, (20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000, 20000, 50000) if hi / lo < 50
-                 else (20, 50, 100, 200, 500, 1000, 5000, 20000, 50000))   # wide: labels would overlap
+        log_axis(row[0].xaxis, log_ticks(lo / 1.15, hi * 1.15))
     else:
         pad = 0.08 * (hi - lo) + 1
         row[0].set_xlim(lo - pad, hi + pad)
