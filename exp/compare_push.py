@@ -50,7 +50,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from matplotlib.lines import Line2D  # noqa: E402
 
-from compare_tms import DOT, SCALE, fig_tradeoff, log_axis, save, trace_steps  # noqa: E402
+from compare_tms import DOT, SCALE, TRADEOFFS, fig_tradeoff, log_axis, save, trace_steps  # noqa: E402
 from summarize import COLOR  # noqa: E402
 
 RTT = 20
@@ -60,6 +60,7 @@ LABEL = {"throughput": "QUIC push", "webrtc-push": "WebRTC push"}
 STALL_MS = max(3 * 1000 / 60, 1000 / 60 + 150)
 METRICS = {"latency_ms": "mean latency (ms)", "latency_median_ms": "median latency (ms)",
            "latency_p95_ms": "95th pct. latency (ms)", "latency_max_ms": "max latency (ms)",
+           "latency_p90_ms": "90th pct. latency (ms)", "latency_p99_ms": "99th pct. latency (ms)",
            "lat_gt150": "latency > 150 ms", "lat_gt200": "latency > 200 ms",
            "shown": "viewpoints shown", "fps": "frames drawn / s",
            "repeat_share": "repeat frames", "repeat_bytes": "repeat bytes",
@@ -146,7 +147,7 @@ def measures(d, run, q):
     rep = fr["repeat"]
     shares, age = screen_age(vp, fr, lo, hi)
     x = {"latency_ms": lat.mean(), "latency_median_ms": lat.median(), "latency_p95_ms": lat.quantile(0.95),
-         "latency_max_ms": lat.max(), "lat_gt150": (lat > 150).mean(), "lat_gt200": (lat > 200).mean(),
+         "latency_p90_ms": lat.quantile(0.90), "latency_p99_ms": lat.quantile(0.99), "latency_max_ms": lat.max(), "lat_gt150": (lat > 150).mean(), "lat_gt200": (lat > 200).mean(),
          "shown": len(own) / len(vp), "fps": len(fr) / span,
          "repeat_share": rep.mean(), "repeat_bytes": fr.loc[rep, "bytes"].sum() / fr["bytes"].sum(),
          "frame_kb": fr["bytes"].mean() / 1e3, "new_kb": fr.loc[~rep, "bytes"].mean() / 1e3,
@@ -347,8 +348,9 @@ def main():
     fig_cdf(lat, os.path.join(out, "latency_cdf.pdf"))
     fig_columns(runs, os.path.join(out, "columns.pdf"))
     fig_timeseries(runs, os.path.join(out, "timeseries.pdf"))
-    fig_tradeoff(runs, os.path.join(out, "tradeoff.pdf"), TRACES, SCHEMES, "abr", LABEL, COLOR,
-                 {"webrtc-push": "D"}, ("psnr", "ssim", "vmaf"), METRICS)
+    for lat, suffix in TRADEOFFS.items():
+        fig_tradeoff(runs, os.path.join(out, f"tradeoff{suffix}.pdf"), TRACES, SCHEMES, "abr", LABEL, COLOR,
+                     {"webrtc-push": "D"}, ("psnr", "ssim", "vmaf"), METRICS, lat)
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_push: {len(runs)} runs, output in {out}")
 

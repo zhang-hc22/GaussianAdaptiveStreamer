@@ -56,6 +56,7 @@ METRICS = {"psnr_own": "PSNR, own frames (dB)", "psnr_all": "PSNR, all (dB)", "s
            "vmaf_own": "VMAF, own", "lpips_own": "LPIPS, own", "vmaf_all": "VMAF, all",
            "latency_ms": "mean latency (ms)", "latency_median_ms": "median latency (ms)",
            "latency_p95_ms": "95th pct. latency (ms)", "catchup_p95_ms": "95th pct. catch-up (ms)",
+           "latency_p90_ms": "90th pct. latency (ms)", "latency_p99_ms": "99th pct. latency (ms)",
            "own_share": "own frames", "fps": "frames / s", "stall_share": "stall share",
            "stalls_min": "stalls / min", "bandwidth_mbps": "bandwidth used (Mbit/s)",
            "trace_mbps": "trace (Mbit/s)", "profile_mean": "mean profile", "qp_mean": "mean QP"}
@@ -111,6 +112,7 @@ def qoe(vp, q):
     gaps = np.diff(np.sort(own["drawn"].to_numpy()))
     stall = gaps[gaps > max(3 * dt, dt + 150)]
     x = {"latency_ms": lat.mean(), "latency_median_ms": lat.median(), "latency_p95_ms": lat.quantile(0.95),
+         "latency_p90_ms": lat.quantile(0.90), "latency_p99_ms": lat.quantile(0.99),
          "catchup_ms": np.nanmean(catchup), "catchup_p95_ms": np.nanpercentile(catchup, 95),
          "own_share": len(own) / n, "fps": len(own) / (span / 1e3),
          "stall_share": stall.sum() / span, "stalls_min": len(stall) / (span / 6e4),
@@ -252,12 +254,16 @@ def fig_columns(runs, path, metrics=COLUMNS):
     save(fig, path)
 
 
+TRADEOFFS = {"latency_ms": "", "latency_p90_ms": "_p90", "latency_p99_ms": "_p99"}   # column: file suffix
+
+
 def fig_tradeoff(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LABEL, color=COLOR, marker=None,
-                 quality=("psnr_own", "ssim_own", "vmaf_own"), names=METRICS):
-    """Quality against mean latency, one row per trace, one column each for
-    PSNR, SSIM and VMAF. The latency axis falls from left to right, so the
-    better side is up and to the right. Small dots are the runs, the large
-    marker with a black edge the mean of the group's runs."""
+                 quality=("psnr_own", "ssim_own", "vmaf_own"), names=METRICS, lat="latency_ms"):
+    """Quality against a run's latency (lat: mean, 90th or 99th pct.), one
+    row per trace, one column each for PSNR, SSIM and VMAF. The latency axis
+    falls from left to right, so the better side is up and to the right.
+    Small dots are the runs, the large marker with a black edge the mean of
+    the group's runs."""
     marker = marker or {}
     fig, axes = plt.subplots(len(traces), len(quality), figsize=(15, 3.6 * len(traces) + 0.6), sharex="row",
                              squeeze=False)
@@ -265,29 +271,29 @@ def fig_tradeoff(runs, path, traces=TRACES, groups=SCHEMES, key="abr", label=LAB
         sel = runs[runs["trace"] == trace]
         for ax, q in zip(row, quality):
             for g in groups:
-                a = sel[sel[key] == g][["latency_ms", q]].dropna()
+                a = sel[sel[key] == g][[lat, q]].dropna()
                 if not len(a):
                     continue
                 m = marker.get(g, "o")
-                ax.scatter(a["latency_ms"], a[q], s=DOT, color=color[g], marker=m, alpha=0.45, lw=0, zorder=3)
-                ax.scatter(a["latency_ms"].mean(), a[q].mean(), s=5 * DOT, color=color[g], marker=m,
+                ax.scatter(a[lat], a[q], s=DOT, color=color[g], marker=m, alpha=0.45, lw=0, zorder=3)
+                ax.scatter(a[lat].mean(), a[q].mean(), s=5 * DOT, color=color[g], marker=m,
                            edgecolors="black", lw=0.8 * SCALE, zorder=4)
             ax.set_ylabel(f"{name}\n{names[q]}" if q == quality[0] else names[q])
             ax.grid(alpha=0.3)
-        lat = sel[sel[key].isin(groups)]["latency_ms"].dropna()
-        if not len(lat):
+        x = sel[sel[key].isin(groups)][lat].dropna()
+        if not len(x):
             continue
-        lo, hi = lat.min(), lat.max()
+        lo, hi = x.min(), x.max()
         if hi / lo > 3:   # e.g. QUIC's backlog on the NYC traces
             row[0].set_xscale("log")
             row[0].set_xlim(lo / 1.15, hi * 1.15)
-            log_axis(row[0].xaxis)
+            log_axis(row[0].xaxis, (20, 30, 50, 100, 200, 300, 500, 1000, 2000, 5000, 10000, 20000, 50000))
         else:
             pad = 0.08 * (hi - lo) + 1
             row[0].set_xlim(lo - pad, hi + pad)
         row[0].set_xlim(row[0].get_xlim()[::-1])   # latency falls to the right
     for ax in axes[-1]:
-        ax.set_xlabel("mean latency (ms)")
+        ax.set_xlabel(names[lat])
     h = [Line2D([], [], color=color[g], marker=marker.get(g, "o"), markeredgecolor="black", lw=0, label=label[g])
          for g in groups if (runs[key] == g).any()]
     fig.legend(handles=h, loc="upper center", ncol=len(h), frameon=False)
@@ -380,7 +386,8 @@ def main():
     fig_cdf(lat, os.path.join(out, "latency_cdf.pdf"))
     fig_columns(runs, os.path.join(out, "columns.pdf"))
     fig_timeseries(runs, os.path.join(out, "timeseries.pdf"))
-    fig_tradeoff(runs, os.path.join(out, "tradeoff.pdf"), marker={"webrtc-tms": "D"})
+    for lat, suffix in TRADEOFFS.items():
+        fig_tradeoff(runs, os.path.join(out, f"tradeoff{suffix}.pdf"), marker={"webrtc-tms": "D"}, lat=lat)
     print(open(os.path.join(out, "tables.md")).read())
     print(f"compare_tms: {len(runs)} runs, output in {out}")
 
