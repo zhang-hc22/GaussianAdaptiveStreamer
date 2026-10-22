@@ -1,0 +1,155 @@
+# Mortise's GCC trade-off controller (tigas_sender --enable_mortise, sparkrtc
+# 920865ec29; work/tigas-push-mortise-plan.md) in WebRTC push, on the nine
+# traces of exp/push_dips.toml (bus x8 left out) and exp/push_nyc.toml, with
+# their settings. The other five groups are those runs.
+#
+# mortise: --enable_mortise=true; mortise_mae: and --enable_mae=true.
+# Tables per group: _ghent (train x8, car x8), _dips_nyc (NYC 3109898,
+# 3114405), _nyc (the five random NYC traces), as the scales differ.
+# The dips- and nyc- prefixes let exp/compare_dips.py read them with the
+# rest:
+#
+#   for g in mortise mortise_mae; do
+#     python exp/run_all.py --config exp/push_mortise.toml --only ${g}_ghent ${g}_dips_nyc \
+#       --out exp/results/dips-${g//_/-}
+#     python exp/run_all.py --config exp/push_mortise.toml --only ${g}_nyc --out exp/results/nyc-${g//_/-}
+#   done
+#
+# Before them, mortise_smoke (one Mortise run on NYC 3203600 and 3219061) to
+# exp/results/mortise-smoke, and webrtc_regress (the webrtc group, Mortise
+# off, 3 runs on the same two traces) to exp/results/mortise-regress, to
+# compare with the runs of the old binary (b3f26483a2).
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+[mortise_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[mortise_dips_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
+
+[mortise_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2925703-home1", "nyc-3203600-timessquare", "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3552192-bus"]
+scales = [1]
+trace_start_s = {nyc-2925703-home1 = 143, nyc-3203600-timessquare = 170, nyc-3219061-home = 851, nyc-3453943-timessquare = 211, nyc-3552192-bus = 72}
+rtt_ms = [20]
+reps = 3
+
+[mortise_mae_ghent]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true", "--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["train", "car"]
+scales = [8]
+trace_start_s = {train = 147, car = 198}
+rtt_ms = [20]
+reps = 3
+
+[mortise_mae_dips_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true", "--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3109898-bus", "nyc-3114405-bus"]
+scales = [1]
+trace_start_s = {nyc-3109898-bus = 370, nyc-3114405-bus = 82}
+rtt_ms = [20]
+reps = 3
+
+[mortise_mae_nyc]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true", "--enable_mae=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-2925703-home1", "nyc-3203600-timessquare", "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3552192-bus"]
+scales = [1]
+trace_start_s = {nyc-2925703-home1 = 143, nyc-3203600-timessquare = 170, nyc-3219061-home = 851, nyc-3453943-timessquare = 211, nyc-3552192-bus = 72}
+rtt_ms = [20]
+reps = 3
+
+[mortise_smoke]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mortise=true"]
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3203600-timessquare", "nyc-3219061-home"]
+scales = [1]
+trace_start_s = {nyc-3203600-timessquare = 170, nyc-3219061-home = 851}
+rtt_ms = [20]
+reps = 1
+
+[webrtc_regress]
+transport = "webrtc"
+pacing = "push"
+event_ms = 40
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["nyc-3203600-timessquare", "nyc-3219061-home"]
+scales = [1]
+trace_start_s = {nyc-3203600-timessquare = 170, nyc-3219061-home = 851}
+rtt_ms = [20]
+reps = 3

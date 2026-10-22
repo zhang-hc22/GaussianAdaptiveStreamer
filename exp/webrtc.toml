@@ -1,0 +1,88 @@
+# The WebRTC transport (sparkrtc tigas_sender)
+# under the networks of config.toml: the same scene, trajectory, Ghent
+# traces, RTTs and repetitions, with the ABR level replaced by the pacing.
+# run_all.py runs the tables in this order, so all tms runs come first.
+#
+# pacing: tms sends viewpoint i at t0 + W + tMs_i; closed sends the next one
+#   when the frame of the previous one has been read, as /player does.
+# warmup_mode: what the page sends before t0 + W (exp/runner_webrtc.js).
+# warmup_rate = "first": the warm-up segment of the trace runs at the Ghent
+#   trace's second-0 rate, not 50 Mbit/s.
+#
+#   python exp/run_all.py --config exp/webrtc.toml --out exp/results/webrtc
+#   python exp/run_all.py --config exp/webrtc.toml --out exp/results/webrtc --only ghent_tms rtt_bus_tms rtt_tms
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false    # metrics_paper.py re-encodes with /render's JPEG quality
+
+[ghent_tms]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[rtt_bus_tms]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [5, 10, 40, 80]
+reps = 3
+
+[rtt_tms]
+transport = "webrtc"
+pacing = "tms"
+warmup_mode = "reverse"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [5, 10, 20, 40, 80]
+reps = 3
+
+[ghent_closed]
+transport = "webrtc"
+pacing = "closed"
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+reps = 9
+
+[rtt_bus_closed]
+transport = "webrtc"
+pacing = "closed"
+warmup_mode = "reverse"
+warmup_rate = "first"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [5, 10, 40, 80]
+reps = 3
+
+[rtt_closed]
+transport = "webrtc"
+pacing = "closed"
+warmup_mode = "reverse"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [5, 10, 20, 40, 80]
+reps = 3

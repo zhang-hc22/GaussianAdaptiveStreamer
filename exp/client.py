@@ -16,6 +16,13 @@ directly with --server 127.0.0.1. Steps:
 
 Times in frames.ndjson are ms since t0.
 
+With --pacing tms viewpoint i is asked for at its time on the trajectory,
+t0 + W + tMs_i (due in frames.ndjson), one request at a time; the viewpoints
+that came due while a request was out are skipped (exp/runner.js). A skipped
+viewpoint has a line with "error": "skipped" and standin_i, the viewpoint
+whose frame was on screen while it was due; run.json counts them as skipped,
+not as failed. The default --pacing closed is runOnePlayback's.
+
 With --session the page plays several runs one after another, as the
 paper's runExperimentSequentialABRs (templates/player.html:1013) does: the
 same page and QUIC connection, a new ABR object per run and --gap-ms between
@@ -34,6 +41,36 @@ frame of it was drawn), wt_frames.ndjson one line per frame of the playback
 and wt_sends.json the pose messages [time, viewpoint, profile]. At the end
 the page sends the server the message it sends on beforeunload, so the server
 stops rendering for it.
+
+With --mode webrtc it opens a blank page and runs exp/runner_webrtc.js: the
+page signs in to peerconnection_server at --server:--signaling-port, takes
+the offer of tigas_sender (run_one.py starts both), warms up from the moment
+the DataChannel opens to t0 + W (--warmup-mode) and sends the viewpoints with
+--pacing. Each viewpoint is rendered at profile 0 and --resolution with the
+camera /player uses after Apply (fx 1300, fy 800, cx and cy half the size).
+frames.ndjson has one line per viewpoint: send, dec (its first frame read
+from the track; drawn is the same time, for the scripts that read drawn),
+shown (that frame's presentationTime from requestVideoFrameCallback, if it
+was presented), recv (the receiveTime requestVideoFrameCallback gives for
+that frame; track frames carry none, so viewpoints never presented have no
+recv), rtp_ts, render_ms, t_push (frame
+handed to the encoder, sender clock = page clock on one host); "error":
+"no frame" or "timeout" if none was read. webrtc_frames.ndjson has every
+frame read, webrtc_warmup.ndjson the warm-up messages, webrtc_shown.ndjson
+the presented frames, receiver_stats.ndjson getStats every 100 ms, and
+frames/<i>.yuv the I420 of every 12th viewpoint. Such a viewpoint that got
+no frame has frames/<i>_standin.yuv instead, the frame on screen while its
+frame was due (exp/runner_webrtc.js), and standin_i in frames.ndjson: the
+viewpoint that frame belongs to (negative: a warm-up frame).
+--pacing push streams like --mode wt: viewpoint k is set at
+start + k * --event-ms, the page sends the current viewpoint every
+--pose-ms and tigas_sender (run with --push_fps) renders the latest one at
+a fixed rate. In frames.ndjson send and due are then the time viewpoint k
+was set and start + k * --event-ms, dec is its first frame read, s and tick
+that frame's message and push tick, msg the time that message was sent, and
+"error": "no frame" means no frame of it was read (as in --mode wt, a
+viewpoint can be skipped). webrtc_sends.json has every viewpoint message
+[time, s, viewpoint].
 """
 import argparse
 import base64
@@ -46,7 +83,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-from common import REPO, chromium_args, git_commit
+from common import REPO, chromium_args, git_commit, webrtc_chromium_args
 
 FIRST_FRAME_JS = "() => document.getElementById('stage_placeholder')?.style.display === 'none'"
 FIRST_FRAME_WT_JS = "() => window.TIGAS && window.TIGAS.last !== null"
@@ -60,7 +97,7 @@ APPLY_RESOLUTION_JS = """res => {
     if (sel.value !== res) throw new Error(`the Resolution menu has no ${res}`);
     window.TIGAS.applyConfig();
 }"""
-TIMES = ("send", "req_start", "resp_start", "resp_end", "drawn")
+TIMES = ("due", "send", "req_start", "resp_start", "resp_end", "drawn")
 
 
 def main():
@@ -69,11 +106,28 @@ def main():
     ap.add_argument("--port", type=int, default=4433)
     ap.add_argument("--scene", default="train")
     ap.add_argument("--trajectory", required=True, help="path, or relative to TestMovements/")
-    ap.add_argument("--mode", choices=["player", "wt"], default="player",
-                    help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push")
+    ap.add_argument("--mode", choices=["player", "wt", "webrtc"], default="player",
+                    help="player: /player, one request per viewpoint; wt: /player-wt, WebTransport push; "
+                    "webrtc: tigas_sender over WebRTC")
+    ap.add_argument("--signaling-port", type=int, default=8888, help="--mode webrtc: peerconnection_server")
+    ap.add_argument("--pacing", choices=["tms", "closed", "push"],
+                    help="tms sends viewpoint i at t0 + W + tMs_i (--mode player: skips the viewpoints "
+                    "that came due while a request was out); closed sends the next one when the frame "
+                    "of the previous one has been read; push (--mode webrtc) streams like --mode wt. "
+                    "Default: tms for --mode webrtc, closed for --mode player")
+    ap.add_argument("--warmup-mode", choices=["reverse", "pose0"], default="reverse",
+                    help="--mode webrtc: what the page sends before t0 + W (exp/runner_webrtc.js)")
+    ap.add_argument("--closed-timeout-ms", type=float, default=2000,
+                    help="--pacing closed: send the next viewpoint after this long without a frame")
+    ap.add_argument("--save-every", type=int, default=12, help="--mode webrtc: save every Nth viewpoint's frame")
+    ap.add_argument("--no-display", action="store_true",
+                    help="--mode webrtc: no <video> element, so no requestVideoFrameCallback times")
     ap.add_argument("--abr", choices=["simple", "l2a", "lol+", "throughput"],
                     help="required without --session; throughput (ThroughputABR) is the one of --mode wt")
-    ap.add_argument("--event-ms", type=float, default=40, help="--mode wt: one viewpoint every N ms")
+    ap.add_argument("--event-ms", type=float, default=40,
+                    help="--mode wt and --pacing push: one viewpoint every N ms")
+    ap.add_argument("--pose-ms", type=float, default=10,
+                    help="--pacing push: wait N ms after each viewpoint message, as /player-wt does")
     ap.add_argument("--tail-ms", type=float, default=1000,
                     help="--mode wt: keep recording frames N ms after the last viewpoint")
     ap.add_argument("--seed", type=int, default=1)
@@ -91,6 +145,18 @@ def main():
     ap.add_argument("--verbose-console", action="store_true",
                     help="keep the ABRs' console.log (off by default)")
     a = ap.parse_args()
+    if a.mode == "wt" and a.pacing:
+        ap.error("--mode wt has its own pacing (--event-ms)")
+    if a.mode == "player" and a.session and a.pacing == "tms":
+        ap.error("--pacing tms plays one run")
+    if a.pacing == "push" and a.mode != "webrtc":
+        ap.error("--pacing push is for --mode webrtc (--mode wt is the QUIC one)")
+    if a.mode != "wt":
+        a.pacing = a.pacing or ("tms" if a.mode == "webrtc" else "closed")
+    if a.mode == "webrtc":
+        if a.session:
+            ap.error("--mode webrtc plays one run")
+        a.abr = a.abr or f"webrtc-{a.pacing}"
     if not a.abr and not a.session:
         ap.error("--abr or --session is required")
     if a.mode == "wt" and (a.session or a.abr != "throughput"):
@@ -146,19 +212,21 @@ def main():
                 f["t_ms"] = ev.get("tMs")
                 fh.write(json.dumps(f) + "\n")
         frames = res["frames"]
-        failed = sum("error" in f for f in frames)
+        skipped = sum(f.get("error") == "skipped" for f in frames)
+        failed = sum("error" in f for f in frames) - skipped
         run.update(
             status="ok" if failed == 0 else "error",
             start_ms=res["start"] - t0_ms, end_ms=res["end"] - t0_ms,
-            camera=res["camera"], frames=len(frames), failed_frames=failed,
+            camera=res["camera"], frames=len(frames) - skipped, failed_frames=failed, skipped=skipped,
             profiles={p: sum(f.get("profile") == p for f in frames) for p in range(4)},
             page_errors=errors[-20:])
         if session:
             run["session"] = {"dir": a.out, "index": k + 1, "runs": len(plan),
                               "gap_ms": run["start_ms"] - runs[k - 1]["end_ms"] if k else None}
         save(run, out)
-        print(f"client: {run['args']['abr']} {len(frames)} frames in {(res['end'] - res['start']) / 1e3:.1f} s, "
-              f"profiles {list(run['profiles'].values())}, failed {failed}", flush=True)
+        print(f"client: {run['args']['abr']} {a.pacing} {len(frames) - skipped} frames in "
+              f"{(res['end'] - res['start']) / 1e3:.1f} s, profiles {list(run['profiles'].values())}, "
+              f"failed {failed}, skipped {skipped}", flush=True)
         return failed == 0
 
     def finish_wt(k, res):
@@ -214,10 +282,88 @@ def main():
               f"profiles {list(run['profiles'].values())}", flush=True)
         return bool(drawn)
 
+    def save_yuv(_source, i, w, h, b64, kind="frame"):
+        name = f"{i:06d}.yuv" if kind == "frame" else f"{i:06d}_standin.yuv"
+        with open(os.path.join(a.out, "frames", name), "wb") as fh:
+            fh.write(base64.b64decode(b64))
+
+    def finish_webrtc(res):
+        """frames.ndjson, the webrtc_*.ndjson files, receiver_stats.ndjson and
+        run.json of a --mode webrtc run."""
+        run, out = runs[0], a.out
+
+        def rel(t):
+            return None if t is None else round(t - t0_ms, 3)
+
+        def write(name, recs, keys):
+            with open(os.path.join(out, name), "w") as fh:
+                for r in recs:
+                    fh.write(json.dumps(dict(r, **{k: rel(r.get(k)) for k in keys if k in r})) + "\n")
+
+        rtp_to_i = {m["rtp_ts"]: m["i"] for m in res["metas"]}
+        push = a.pacing == "push"
+        sent_at = {s: t for t, s, _ in res["sends"]}
+        first_shown = {}
+        for s in res["shown"]:
+            first_shown.setdefault(s["rtp"], s)
+        poses = res["poses"]
+        standin = {x["i"]: x["from_rtp"] for x in res["standins"]}
+        for p, ev in zip(poses, events):
+            p["t_ms"] = ev.get("tMs")
+            p["drawn"] = p.get("dec")
+            s = first_shown.get(p.get("rtp_ts"))
+            if s:
+                p["shown"] = s["presented"]
+                if p.get("recv") is None:
+                    p["recv"] = s["recv"]
+            if p["i"] in standin:
+                p["standin_i"] = rtp_to_i.get(standin[p["i"]])
+            if push and "s" in p:
+                p["msg"] = sent_at.get(p["s"])
+        write("frames.ndjson", poses, ("send", "due", "msg", "dec", "drawn", "shown", "recv", "t_push", "t_meta"))
+        if push:
+            json.dump([[rel(t), s, i] for t, s, i in res["sends"]], open(os.path.join(out, "webrtc_sends.json"), "w"))
+        for f in res["decoded"]:
+            f.setdefault("i", rtp_to_i.get(f["rtp"]))
+        write("webrtc_frames.ndjson", res["decoded"], ("dec", "recv", "cap"))
+        write("webrtc_warmup.ndjson", res["warm"], ("send", "dec"))
+        for s in res["shown"]:
+            s["i"] = rtp_to_i.get(s["rtp"])
+        write("webrtc_shown.ndjson", res["shown"], ("presented", "expected", "recv"))
+        write("receiver_stats.ndjson", res["rstats"], ("t",))
+
+        got = [p for p in poses if "dec" in p]
+        decoded = res["decoded"]
+        run.update(
+            status="ok" if got else "error",
+            start_ms=rel(res["start"]), end_ms=rel(res["end"]), camera=res["camera"],
+            frames=len(got), failed_frames=len(poses) - len(got), profiles={0: len(got)},
+            webrtc={"pacing": a.pacing, "warmup_mode": a.warmup_mode,
+                    "times": {k: rel(v) for k, v in res["times"].items()},
+                    "warmup_sent": len(res["warm"]),
+                    "warmup_decoded": sum("dec" in w for w in res["warm"]),
+                    "frames_read": len(decoded),
+                    "frames_without_message": sum(f["i"] is None for f in decoded),
+                    "frames_before_message": res["pendingAtRead"],
+                    "standins": len(standin),
+                    "formats": sorted({f["fmt"] for f in decoded if f.get("fmt")}),
+                    "messages": len(res["metas"]), "presented": len(res["shown"]),
+                    "viewpoints_presented": sum("shown" in p for p in poses),
+                    "timeouts": sum(p.get("error") == "timeout" for p in poses),
+                    **({"event_ms": a.event_ms, "pose_ms": a.pose_ms, "sends": len(res["sends"])}
+                       if push else {})},
+            page_errors=errors[-20:])
+        save(run, out)
+        print(f"client: webrtc {a.pacing} {len(got)}/{len(poses)} viewpoints decoded in "
+              f"{(res['end'] - res['start']) / 1e3:.1f} s, {len(decoded)} frames read, "
+              f"{run['webrtc']['warmup_decoded']}/{len(res['warm'])} warm-up", flush=True)
+        # push skips viewpoints by design, as --mode wt does
+        return bool(got) if push else len(got) == len(poses)
+
     errors, done = [], 0
     try:
         with sync_playwright() as pw:
-            args = chromium_args(origin)
+            args = webrtc_chromium_args() if a.mode == "webrtc" else chromium_args(origin)
             browser = pw.chromium.launch(headless=True, args=args)
             page = browser.new_context(ignore_https_errors=True).new_page()
             page.on("pageerror", lambda e: errors.append(str(e)))
@@ -226,6 +372,35 @@ def main():
 
             t0 = a.t0 or time.time()
             t0_ms = t0 * 1e3
+            if a.mode == "webrtc":
+                page.expose_binding("tigasSaveYuv", save_yuv)
+                page.goto("about:blank")
+                page.add_script_tag(path=os.path.join(REPO, "exp", "runner_webrtc.js"))
+                # The first RTCPeerConnection of a page takes ~150 ms on our test host;
+                # a throwaway one here keeps that before t0.
+                page.evaluate("ev => { window.tigasEvents = ev; new RTCPeerConnection().close(); }", events)
+                # The page's first packet, its sign-in to the signaling server,
+                # starts the rattan trace. t0 is taken once the script and the
+                # events are in, so that packet comes a few ms after t0, as
+                # /player's first request does; before, page setup put it
+                # ~130 ms after.
+                loaded_ms = (time.time() - t0) * 1e3
+                t0 = a.t0 or time.time()
+                t0_ms = t0 * 1e3
+                w, h = map(int, a.resolution.split("x"))
+                camera = {"fx": 1300.0, "fy": 800.0, "cx": w / 2, "cy": h / 2, "width": w, "height": h}
+                runs[0].update(chromium=browser.version, chromium_args=args, t0=t0, loaded_ms=loaded_ms)
+                res = page.evaluate("cfg => window.tigasRunWebRTC(cfg)", {
+                    "signaling": f"http://{a.server}:{a.signaling_port}",
+                    "modelId": a.scene, "camera": camera, "startAtMs": (t0 + a.warmup) * 1e3,
+                    "pacing": a.pacing, "warmup": a.warmup_mode, "closedTimeoutMs": a.closed_timeout_ms,
+                    "tailMs": a.tail_ms, "saveEvery": a.save_every, "display": not a.no_display,
+                    "eventMs": a.event_ms, "poseMs": a.pose_ms,
+                    "connectTimeoutMs": a.warmup * 1e3, "quiet": not a.verbose_console})
+                ok = finish_webrtc(res)
+                done = 1
+                browser.close()
+                sys.exit(0 if ok else 1)
             wt = a.mode == "wt"
             page.goto(f"https://{origin}/{'player-wt' if wt else 'player'}?modelId={a.scene}", timeout=30000)
             loaded_ms = (time.time() - t0) * 1e3
@@ -260,7 +435,7 @@ def main():
                 res = page.evaluate("cfg => window.tigasRun(cfg)", {
                     "events": events, "abr": p["abr"], "seed": p["seed"], "run": k,
                     "startAtMs": (t0 + a.warmup) * 1e3, "delayMs": a.gap_ms if k else 0,
-                    "quiet": not a.verbose_console})
+                    "quiet": not a.verbose_console, "pacing": a.pacing})
                 ok = finish(k, res) and ok
                 done += 1
             browser.close()

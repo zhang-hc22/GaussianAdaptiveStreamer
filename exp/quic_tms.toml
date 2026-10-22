@@ -1,0 +1,43 @@
+# /player over QUIC with the viewpoints sent at their trajectory times
+# (pacing tms, client.py --pacing tms): the tables of config.toml, so the
+# same scene, trajectory, Ghent traces, RTTs, ABRs and repetitions. Results
+# go to their own directory, as the run paths are those of config.toml.
+#
+#   python exp/run_all.py --config exp/quic_tms.toml --out exp/results/quic-tms
+#   python exp/run_all.py --config exp/quic_tms.toml --out exp/results/quic-tms --rtt-ms 20
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false    # metrics_paper.py knows no skipped viewpoints
+
+[ghent]
+pacing = "tms"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [20]
+abrs = ["simple", "l2a", "lol+"]
+reps = 9
+
+[rtt_bus]
+pacing = "tms"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = ["bus"]
+scales = [8, 1]
+rtt_ms = [5, 10, 40, 80]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3
+
+[rtt]
+pacing = "tms"
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = []
+rtt_ms = [5, 10, 20, 40, 80]
+abrs = ["simple", "l2a", "lol+"]
+reps = 3
