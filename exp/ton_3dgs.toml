@@ -1,0 +1,196 @@
+# The 3DGS experiment of the Mortise ToN paper (figures fig:3dgs-box and
+# fig:3dgs-tradeoff): seven ways to stream the "train" scene over 23 NYC
+# cellular traces, 6 runs each, 966 runs in all.
+#
+# Common settings: 1280x720; the client sends one viewpoint every 40 ms
+# (NTHU user3_train) and the server pushes 60 frames a second; rattan with
+# a 20 ms RTT; a 10 s warm-up at the trace's rate of its first second. Each
+# trace plays one 87 s window from trace_start_s (none: from 0 s). The
+# windows were chosen in earlier batches: 3114405 by hand for its deep
+# drops, the others at random with a fixed seed, six of them redrawn because
+# the first window was too steady. The traces are the Orca NYC traces
+# (traces/download_nyc.sh).
+#
+# Run each table into its own directory. The WebRTC tables share run paths
+# (sender_args are not in the path), so two of them in one --out would skip
+# each other's runs:
+#
+#   for t in quic webrtc mae salsify mortise_v2 mortise_v2_mae mortise_v2_salsify; do
+#     python exp/run_all.py --config exp/ton_3dgs.toml --only $t --out exp/results/ton-3dgs-$t
+#   done
+#
+# The WebRTC tables need tigas_sender from webrtc/sparkrtc. The paper's runs
+# (2026-10-19 to 10-24, streaming217, 218, 219 and 170) used the sparkrtc
+# commits noted per table; sparkrtc main gives the same field trials for
+# these flags.
+
+[server]
+resolution = "1280x720"
+warmup_s = 10
+timeout_s = 900
+metric_stride = 12
+paper_metrics = false
+
+# TIGAS as published: QUIC with WebTransport push (/player-wt) and its throughput ABR. No tigas_sender.
+[quic]
+mode = "wt"
+abrs = ["throughput"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# WebRTC with GCC (sparkrtc 920865ec29; 12 runs on b3f26483a2, which only lacks --enable_mortise).
+[webrtc]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# WebRTC with GCC and MAE, sparkrtc's More Adaptive Encoder (920865ec29; 12 runs on b3f26483a2).
+[mae]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_mae=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# WebRTC with GCC and the Salsify baseline: x264 VBV fixed to one frame (sparkrtc 4cffbd3691).
+[salsify]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--enable_salsify=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# Mortise v2 tunes GCC (sparkrtc 674d73dba1, run as --mortise=v1
+# --mortise_args=umin_rq:1,probe:0.1,det_overuse_ms:100, the field trial of --mortise=v2).
+[mortise_v2]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--mortise=v2"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# Mortise v2 with MAE (sparkrtc 4cffbd3691).
+[mortise_v2_mae]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--mortise=v2", "--enable_mae=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
+
+# Mortise v2 with the Salsify baseline (sparkrtc 1f851e4d4a).
+[mortise_v2_salsify]
+transport = "webrtc"
+pacing = "push"
+push_fps = 60
+warmup_mode = "reverse"
+warmup_rate = "first"
+sender_args = ["--mortise=v2", "--enable_salsify=true"]
+event_ms = 40
+scenes = ["train"]
+trajectories = ["NTHU/train/user3_train.json"]
+traces = [
+  "nyc-2767958-taxi1", "nyc-2768760-taxi3", "nyc-2925703-home1", "nyc-3093662-home3",
+  "nyc-3109898-bus", "nyc-3114405-bus", "nyc-3189663-timessquare", "nyc-3199718-timessquare",
+  "nyc-3201037-timessquare", "nyc-3201711-timessquare", "nyc-3202253-timessquare", "nyc-3203600-timessquare",
+  "nyc-3204803-timessquare", "nyc-3205967-timessquare", "nyc-3207521-timessquare", "nyc-3208852-timessquare",
+  "nyc-3219061-home", "nyc-3453943-timessquare", "nyc-3455408-timessquare", "nyc-3457194-timessquare",
+  "nyc-3458374-timessquare", "nyc-3552192-bus", "nyc-3555076-bus",
+]
+scales = [1]
+trace_start_s = {nyc-2767958-taxi1 = 48, nyc-2925703-home1 = 143, nyc-3093662-home3 = 9, nyc-3109898-bus = 146, nyc-3114405-bus = 82, nyc-3189663-timessquare = 245, nyc-3199718-timessquare = 47, nyc-3201037-timessquare = 20, nyc-3201711-timessquare = 8, nyc-3202253-timessquare = 92, nyc-3203600-timessquare = 170, nyc-3204803-timessquare = 38, nyc-3205967-timessquare = 250, nyc-3207521-timessquare = 131, nyc-3208852-timessquare = 106, nyc-3219061-home = 945, nyc-3453943-timessquare = 297, nyc-3455408-timessquare = 202, nyc-3457194-timessquare = 710, nyc-3458374-timessquare = 138, nyc-3552192-bus = 72, nyc-3555076-bus = 740}
+rtt_ms = [20]
+reps = 6
