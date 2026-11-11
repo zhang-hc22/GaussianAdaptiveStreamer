@@ -114,3 +114,28 @@ google-chrome \
 ### Experiment
 
 ![Experiment](images/Experiment.png)
+
+## WebRTC sender and the Mortise ToN experiments
+
+The WebRTC transport (`exp/run_one.py --transport webrtc`) streams the
+rendered frames with `tigas_sender`, built from the sparkrtc fork in the
+submodule `webrtc/sparkrtc`. The submodule only pins the commit
+(`update = none`): sparkrtc is a WebRTC tree that needs gclient for its
+dependencies, so it is built in a separate directory, `<build>` below.
+
+1. Clone depot_tools and put it on `PATH`.
+2. Build x264 165 (the version of sparkrtc's `x264.h`) as position-independent
+   code: `./configure --prefix=<build>/x264-install --enable-static --enable-pic --disable-cli && make && make install`.
+3. Clone `git@github.com:zhang-hc22/sparkrtc-for-tigas.git` to `<build>/src`
+   at the commit of the submodule and create the empty directory
+   `<build>/third_party` (`src/third_party` links to it).
+4. In `<build>/src`: `gclient sync --no-history` (about 20 GB).
+5. `gn gen out/Release --args='is_debug=false spark_x264_lib="<build>/x264-install/lib/libx264.a"'`,
+   then `ninja -C out/Release tigas_sender peerconnection_server`.
+6. Copy both binaries to `webrtc/bin/` on the experiment machine and write
+   the sparkrtc commit into `webrtc/bin/BUILD_INFO`;
+   `exp/setup/check_env.sh` checks that they run.
+
+The experiments of the Mortise ToN paper are `exp/ton_3dgs.toml` and
+`exp/ton_gcc_convergence.toml`; their headers say how to run them. Fetch
+the NYC traces first with `bash traces/download_nyc.sh`.
