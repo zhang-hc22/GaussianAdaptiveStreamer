@@ -28,10 +28,10 @@ def gt_dir(results, scene, trajectory, camera):
                         f"{camera['width']}x{camera['height']}")
 
 
-def groups(results):
+def groups(results, run_rels=None):
     """{(scene, trajectory): (camera, viewpoints)} over the finished runs."""
     out = {}
-    for r in find_runs(results):
+    for r in find_runs(results, run_rels):
         run = json.load(open(os.path.join(r["dir"], "run.json")))
         if run["status"] != "ok":
             continue
@@ -48,9 +48,10 @@ def main():
     ap.add_argument("results")
     ap.add_argument("--stride", type=int, default=12)
     ap.add_argument("--resolution", help="WxH the runs must have used")
+    ap.add_argument("--run-rel", action="append", help="process only this path under runs/; may be repeated")
     a = ap.parse_args()
     results = os.path.abspath(a.results)
-    todo = groups(results)
+    todo = groups(results, a.run_rel)
 
     os.chdir(REPO)   # models.py finds the scenes relative to the repo
     sys.path.insert(0, REPO)
