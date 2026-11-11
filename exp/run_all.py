@@ -10,14 +10,13 @@ results into tables and figures:
    slow drift of the machine reaches all ABRs alike. A failed run is tried
    once more. Runs whose run.json says ok are skipped, so after an
    interruption the same command carries on;
-5. render the reference images (render_gt.py), after the runs so they do
-   not share the GPU with an experiment;
-6. compute the quality metrics, ours (metrics.py) and the paper's
-   (metrics_paper.py);
-7. write the summary tables and figures (summarize.py).
+5. after EACH successful run, render missing references, compute and validate
+   all six quality metrics, then remove only that run's YUV payload;
+6. write the summary tables and figures (summarize.py).
 
-Steps 1 and 3 are skipped when no run is left. Steps 5 to 7 keep what
-earlier invocations produced and only add what is missing; their output goes
+Steps 1 and 3 are skipped when no run is left. Completed runs with pending
+quality are scored before new sessions start. Interrupted scoring or cleanup
+resumes from saved metadata and quality_complete.json. The steps' output goes
 to render_gt.log, metrics.log, metrics_paper.log and summarize.log.
 
 Tables can also restore one of the methods of the paper (the ablations of
@@ -79,6 +78,8 @@ import tomllib
 
 from common import REPO, find_runs, load_events, run_rel, trace_name, traj_name
 from make_traces import build, first_bps, tc_rates
+from quality_store import QualityError, ensure_space, remove_warmup_yuv
+from run_quality import finish_quality, quality_environment
 
 EXP = os.path.join(REPO, "exp")
 PORT = 4433
@@ -399,11 +400,11 @@ class Worker:
 CHILD = None   # the subprocess currently running, stopped on an interruption
 
 
-def call(cmd, stop_group=True):
+def call(cmd, stop_group=True, env=None):
     """Runs cmd in its own session; returns (exit code, output)."""
     global CHILD
     CHILD = (subprocess.Popen(cmd, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, start_new_session=True), stop_group)
+                              text=True, start_new_session=True, env=env), stop_group)
     out = CHILD[0].communicate()[0]
     rc, CHILD = CHILD[0].returncode, None
     return rc, out
@@ -426,6 +427,22 @@ def stop_child():
         proc.wait()
 
 
+def check_quality_space(cfg, out):
+    return ensure_space(out, cfg["server"].get("min_free_gib", 5.0))
+
+
+def finish_run(cfg, out, run):
+    env = quality_environment(cfg)
+    return finish_quality(cfg, out, run, lambda cmd: call(cmd, env=env), log)
+
+
+def finish_warmup(out, directory):
+    result = remove_warmup_yuv(out, directory)
+    log(f"warm-up cleanup: {os.path.relpath(directory, out)}, removed {result['deleted_files']} YUV "
+        f"({result['deleted_bytes']} bytes)")
+    return result
+
+
 def warm_up(out, runs, resolution, warmup_s=30):
     """One short local run per scene: the server loads the model and
     compiles its kernels before the first measured run."""
@@ -438,8 +455,10 @@ def warm_up(out, runs, resolution, warmup_s=30):
                          "--resolution", resolution, "--warmup", str(warmup_s), "--out", d])
         if rc != 0:
             raise SystemExit(f"warm-up of {scene} failed: {text.strip().splitlines()[-1:]}")
-        first = json.load(open(os.path.join(d, "run.json")))["first_frame_ms"]
+        with open(os.path.join(d, "run.json")) as fh:
+            first = json.load(fh)["first_frame_ms"]
         log(f"warm-up: {scene} first frame after {first / 1e3:.1f} s")
+        finish_warmup(out, d)
 
 
 def warm_up_webrtc(out, runs, resolution, worker):
@@ -460,9 +479,11 @@ def warm_up_webrtc(out, runs, resolution, worker):
             if attempt == 2:
                 raise SystemExit(f"WebRTC warm-up of {scene} failed twice: {last_line(rc, text)}")
             log(f"warm-up: {scene} over WebRTC failed ({last_line(rc, text)}), once more")
-        run = json.load(open(os.path.join(d, "run.json")))
+        with open(os.path.join(d, "run.json")) as fh:
+            run = json.load(fh)
         log(f"warm-up: {scene} over WebRTC, data channel open after "
             f"{run['webrtc']['times'].get('dc_open', float('nan')) / 1e3:.2f} s, {run['frames']} frames")
+        finish_warmup(out, d)
 
 
 def meta(r):
@@ -536,6 +557,7 @@ def save_config(path, out):
 
 
 def run_matrix(cfg, out, runs, pending, args):
+    check_quality_space(cfg, out)
     if not args.skip_check:
         check_env(cfg, pending)
     traces = write_traces(cfg, out, runs)
@@ -561,6 +583,7 @@ def run_matrix(cfg, out, runs, pending, args):
             dirs = [os.path.join(out, "runs", x["rel"]) for x in unit] + ([os.path.join(out, r["unit"])]
                                                                           if r["session"] else [])
             for attempt in (1, 2):
+                check_quality_space(cfg, out)
                 if r["mode"] == "webrtc":
                     if not worker.alive():
                         log("render worker: died; restarting")
@@ -597,6 +620,8 @@ def run_matrix(cfg, out, runs, pending, args):
                 if r["shaper"] == "tc-lo":
                     clear_lo("left after the run")
                 if ok:
+                    for x in unit:
+                        finish_run(cfg, out, x)
                     break
                 stamp = time.strftime("__%Y%m%d-%H%M%S")
                 for d in dirs:
@@ -656,18 +681,16 @@ def main():
         f"{len(pending)} to run")
     failed = []
     try:
+        # A measured run is never repeated just because quality was interrupted.
+        # Drain that backlog first, releasing its YUV before any new sessions.
+        for r in runs:
+            if is_done(os.path.join(out, "runs", r["rel"]), r["viewpoints"]):
+                finish_run(cfg, out, r)
         if pending:
             failed = run_matrix(cfg, out, runs, pending, a)
         else:
             write_traces(cfg, out, runs)
-        s = cfg["server"]
-        steps = [("render_gt", ["exp/render_gt.py", out, "--stride", str(s["metric_stride"]),
-                                "--resolution", s["resolution"]]),
-                 ("metrics", ["exp/metrics.py", out, "--stride", str(s["metric_stride"])]),
-                 ("metrics_paper", ["exp/metrics_paper.py", out, "--stride", str(s["metric_stride"])]),
-                 ("summarize", ["exp/summarize.py", out])]
-        if not s.get("paper_metrics", True):
-            steps = [x for x in steps if x[0] != "metrics_paper"]
+        steps = [("summarize", ["exp/summarize.py", out])]
         for step, cmd in steps:
             t = time.time()
             rc, text = call([sys.executable, *cmd])
@@ -684,6 +707,10 @@ def main():
         stop_child()
         log("interrupted; run the same command again to carry on")
         sys.exit(130)
+    except (QualityError, OSError) as exc:
+        stop_child()
+        log(f"stopped: {exc}; resume with the same command after resolving it")
+        sys.exit(1)
     if failed:
         log(f"finished with {len(failed)} failed runs: {', '.join(failed)}")
         sys.exit(1)

@@ -44,6 +44,7 @@ import numpy as np
 from common import CAMERA_KEYS, REPO, find_runs, jpeg_quality, load_events
 from metrics import FFMPEG, PiqMetrics
 from render_gt import INTRINSICS, gt_dir
+from quality_store import QualityError, atomic_csv, expected_samples, validate_csv
 
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 import compute_metrics as paper  # noqa: E402
@@ -111,19 +112,24 @@ def main():
     ap.add_argument("--ffmpeg", default=FFMPEG)
     ap.add_argument("--jobs", type=int, default=max(1, min(16, os.cpu_count() // 2)),
                     help="compute_metrics.py processes at a time")
+    ap.add_argument("--run-rel", action="append", help="process only this path under runs/; may be repeated")
     a = ap.parse_args()
     results = os.path.abspath(a.results)
 
     todo, skipped = [], 0
-    for r in find_runs(results):
+    for r in find_runs(results, a.run_rel):
         run_json = os.path.join(r["dir"], "run.json")
         run = json.load(open(run_json))
-        if run["status"] != "ok":
+        if run["status"] != "ok" or run["args"].get("mode") == "webrtc":
             continue
         out = os.path.join(results, "metrics_paper", r["rel"] + ".csv")
         if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(run_json):
-            skipped += 1
-            continue
+            try:
+                validate_csv(out, expected_samples(r["dir"], a.stride, paper=True))
+                skipped += 1
+                continue
+            except QualityError:
+                pass
         todo.append((r, run, out))
     if not todo:
         print(f"metrics_paper: 0 runs computed, {skipped} already there")
@@ -155,12 +161,8 @@ def main():
             scores = fut.result()
             for row in rows:
                 row["psnr"], row["ssim"], row["vmaf"] = scores[row["i"]]
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out + ".tmp", "w", newline="") as fh:
-                w = csv.DictWriter(fh, fieldnames=FIELDS)
-                w.writeheader()
-                w.writerows(rows)
-            os.replace(out + ".tmp", out)
+            atomic_csv(out, rows, FIELDS)
+            validate_csv(out, expected_samples(r["dir"], a.stride, paper=True))
             same = [row["same_bytes"] for row in rows if row["same_bytes"] != ""]
             means = "  ".join(f"{m} {np.nanmean([row[m] for row in rows]):.3f}" for m in FIELDS[4:])
             print(f"metrics_paper: {r['rel']}: {len(rows)} frames, {len(rows) - len(same)} at another "

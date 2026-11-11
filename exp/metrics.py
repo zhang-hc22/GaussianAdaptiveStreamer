@@ -49,6 +49,7 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from common import REPO, find_runs, traj_name
 from render_gt import gt_dir
+from quality_store import QualityError, atomic_csv, expected_samples, validate_csv
 
 sys.path.insert(0, os.path.join(REPO, "webrtc"))
 from yuv import i420_to_rgb, rgb_to_i420  # noqa: E402
@@ -101,7 +102,7 @@ def vmaf(imgs, ref_paths, ffmpeg):
             os.symlink(ref, os.path.join(tmp, "ref", f"{k:06d}.png"))
         log = os.path.join(tmp, "vmaf.json")
         lavfi = (f"[0:v]scale={w}:{h}:flags=bicubic[d];[1:v]scale={w}:{h}:flags=bicubic[r];"
-                 f"[d][r]libvmaf=log_path={log}:log_fmt=json:n_threads={os.cpu_count()}")
+                 f"[d][r]libvmaf=log_path={log}:log_fmt=json:n_threads={os.environ.get('TIGAS_QUALITY_JOBS', min(4, os.cpu_count() or 1))}")
         p = subprocess.run([ffmpeg, "-v", "error",
                             "-r", "30", "-i", os.path.join(tmp, "dist", "%06d.png"),
                             "-r", "30", "-i", os.path.join(tmp, "ref", "%06d.png"),
@@ -206,12 +207,7 @@ def run_metrics(results, r, stride, ffmpeg, piq_metrics, pool):
 
 
 def write_csv(out, rows, fields):
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out + ".tmp", "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=fields)
-        w.writeheader()
-        w.writerows(rows)
-    os.replace(out + ".tmp", out)
+    atomic_csv(out, rows, fields)
 
 
 def main():
@@ -219,13 +215,18 @@ def main():
     ap.add_argument("results")
     ap.add_argument("--stride", type=int, default=12)
     ap.add_argument("--ffmpeg", default=FFMPEG)
+    ap.add_argument("--run-rel", action="append", help="process only this path under runs/; may be repeated")
+    ap.add_argument("--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)), help="CPU workers and VMAF threads")
     a = ap.parse_args()
     results = os.path.abspath(a.results)
+    if a.jobs < 1:
+        ap.error("--jobs must be positive")
+    os.environ["TIGAS_QUALITY_JOBS"] = str(a.jobs)
     piq_metrics, done, skipped = None, 0, 0
     # workers from a fork server, so they do not inherit the CUDA state of this process
-    pool = ProcessPoolExecutor(os.cpu_count(), mp_context=multiprocessing.get_context("forkserver"))
+    pool = ProcessPoolExecutor(a.jobs, mp_context=multiprocessing.get_context("forkserver"))
     ceilings = {}
-    for r in find_runs(results):
+    for r in find_runs(results, a.run_rel):
         run_json = os.path.join(r["dir"], "run.json")
         run = json.load(open(run_json))
         if run["status"] != "ok":
@@ -238,13 +239,21 @@ def main():
                                              traj_name(run["args"]["trajectory"]),
                                              f"{cam['width']}x{cam['height']}.csv"), run)
         out = os.path.join(results, "metrics", r["rel"] + ".csv")
+        expected = expected_samples(r["dir"], a.stride)
         if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(run_json):
-            skipped += 1
-            continue
+            try:
+                validate_csv(out, expected, require_standin=standins)
+                skipped += 1
+                continue
+            except QualityError:
+                pass  # An incomplete/invalid CSV must be recomputed, never used for deletion.
         t = time.time()
         piq_metrics = piq_metrics or PiqMetrics()
         rows = run_metrics(results, r, a.stride, a.ffmpeg, piq_metrics, pool)
+        if {row["i"] for row in rows} != set(expected):
+            raise QualityError(f"{r['rel']}: sampled YUV/JPEG payload missing; refusing partial quality CSV")
         write_csv(out, rows, ["i", "profile", "bytes", *(["standin"] if standins else []), *METRICS])
+        validate_csv(out, expected, require_standin=standins)
         done += 1
         means = "  ".join(f"{m} {np.nanmean([x[m] for x in rows]):.3f}" for m in METRICS) if rows else ""
         extra = f", {sum(x['standin'] for x in rows)} stand-ins" if standins else ""
@@ -256,6 +265,7 @@ def main():
             write_csv(out, rows, ["i", "profile", *METRICS])
             means = "  ".join(f"{m} {np.nanmean([x[m] for x in rows]):.3f}" for m in METRICS)
             print(f"metrics: {os.path.relpath(out, results)}: {len(rows)} references  {means}", flush=True)
+    pool.shutdown(wait=True)
     print(f"metrics: {done} runs computed, {skipped} already there")
 
 

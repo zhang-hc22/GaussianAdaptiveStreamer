@@ -74,12 +74,24 @@ def run_rel(scene, trajectory, trace, rtt_ms, abr, rep):
     return os.path.join(scene, traj_name(trajectory), trace, f"rtt{rtt_ms:g}", abr, f"rep{rep}")
 
 
-def find_runs(results):
+def find_runs(results, run_rels=None):
     """Every run directory (one with run.json) under <results>/runs, with the
     fields of its path, sorted by path."""
     base = os.path.join(results, "runs")
     out = []
-    for d, dirs, files in os.walk(base, followlinks=True):
+    if run_rels is None:
+        locations = os.walk(base, followlinks=True)
+    else:
+        locations = []
+        for rel in run_rels:
+            d = os.path.join(base, rel)
+            if os.path.isabs(rel) or ".." in rel.split(os.sep) or os.path.commonpath(
+                    [os.path.realpath(base), os.path.realpath(d)]) != os.path.realpath(base):
+                raise ValueError(f"invalid run path: {rel}")
+            if not os.path.isfile(os.path.join(d, "run.json")):
+                raise FileNotFoundError(os.path.join(d, "run.json"))
+            locations.append((d, [], ["run.json"]))
+    for d, dirs, files in locations:
         dirs[:] = [x for x in dirs if x != "frames"]
         if "run.json" not in files:
             continue
